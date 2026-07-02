@@ -1,6 +1,6 @@
 {
   "name": "@tabterm/module-dbm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "tabterm database module — browse SQLite files or connect to Postgres: object tree, filter builder, SQL tab, Create View. Extracted from the tabterm monorepo.",
