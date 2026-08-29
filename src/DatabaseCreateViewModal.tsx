@@ -29,7 +29,7 @@ export function DatabaseCreateViewModal({ source, onClose, onCreated }: {
   const create = async () => {
     setBusy(true); setErr(null);
     try {
-      await dbApi.exec(source, ddl);
+      await dbApi.exec(source, ddl, true);
       onCreated();
       onClose();
     } catch (e) { setErr(String(e)); }

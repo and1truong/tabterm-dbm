@@ -50,6 +50,7 @@ pgDescribe("pgServer (live)", () => {
     const schema = await readPgSchema(url);
     const tbl = schema.tables.find((t) => t.name === T);
     expect(tbl).toBeTruthy();
+    expect(tbl!.schema).toBe("public");
     expect(tbl!.columns.map((c) => c.name)).toEqual(["id", "email", "age"]);
     expect(tbl!.columns.find((c) => c.name === "id")!.pk).toBe(true);
     expect(tbl!.columns.find((c) => c.name === "email")!.notNull).toBe(true);

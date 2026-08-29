@@ -18,8 +18,13 @@ test("dbm client bundle exists + exports activate", async () => {
 
 test("dbm client bundle imports only the host-provided bare specifiers", () => {
   const code = readFileSync(CLIENT, "utf8");
-  const bare = [...code.matchAll(/(?:import|from)\s*["']([^."'/][^"']*)["']/g)]
+  const imports = [
+    ...code.matchAll(/(?:^|[;\n])import[^;"']*?from\s*["']([^"']+)["']/g),
+    ...code.matchAll(/(?:^|[;\n])import\s*["']([^"']+)["']/g),
+  ];
+  const bare = imports
     .map((m) => m[1])
+    .filter((s) => !s.startsWith(".") && !s.startsWith("/"))
     .map((s) => (s.startsWith("@") ? s.split("/").slice(0, 2).join("/") : s.split("/")[0]));
   const allowed = new Set(["react", "react-dom", "zustand"]);
   const offenders = bare.filter((s) => !allowed.has(s) && s !== "react/jsx-runtime");

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Database as DbIcon, RefreshCw, Plus, ChevronDown, Table2, Eye, GitBranch, Filter as FilterIcon, Play } from "lucide-react";
+import { Database as DbIcon, RefreshCw, Plus, ChevronDown, Table2, Eye, Filter as FilterIcon, Search } from "lucide-react";
 import type { ClientHost } from "@tabterm/module-host/client";
 import Notice from "./Notice.tsx";
 import { dbApi } from "./dbApi.ts";
@@ -9,7 +9,15 @@ import type { FilterModel } from "./dbFilter.ts";
 import { DatabaseOpenModal } from "./DatabaseOpenModal.tsx";
 import { DatabaseFilterBuilder } from "./DatabaseFilterBuilder.tsx";
 import { DatabaseCreateViewModal } from "./DatabaseCreateViewModal.tsx";
-import type { DbFile, DbSchema, DbTable, DbColumn, QueryResult } from "../shared.ts";
+import type { DatabaseInsights, DbFile, DbSchema, DbTable, DbColumn, QueryResult, RowChangeStatement } from "../shared.ts";
+import { tableKey, tableLabel, tableSql } from "./sqlIdentifiers.ts";
+import { buildRowChanges, coerceCellValue, editKey, orderBySql, rowsToCsv, toggleSort } from "./dataGrid.ts";
+import type { SortSpec } from "./dataGrid.ts";
+import { SqlWorkspace } from "./SqlWorkspace.tsx";
+import { parseCsv, serializeRows } from "./dataTransfer.ts";
+import type { ExportFormat } from "./dataTransfer.ts";
+import { schemaRelations, schemaToMermaid } from "./schemaDiagram.ts";
+import { DatabaseMigrationModal } from "./DatabaseMigrationModal.tsx";
 
 // Short label for the database chip in the header.
 function sourceChip(src: DbSource | null): string {
@@ -18,7 +26,7 @@ function sourceChip(src: DbSource | null): string {
   return src.label;
 }
 
-type Pane = "structure" | "data" | "sql" | "pragmas";
+type Pane = "structure" | "data" | "sql" | "diagram" | "insights" | "pragmas";
 
 export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId: string }) {
   // cwd is read reactively from the host's app-state projection (not the core
@@ -36,11 +44,16 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   const [pane, setPane] = useState<Pane>("data");
   const [writable, setWritable] = useState(false);
   const [result, setResult] = useState<QueryResult | null>(null);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(100);
+  const [sorts, setSorts] = useState<SortSpec[]>([]);
+  const [dataDirty, setDataDirty] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState<false | "open" | "create">(false);
   const [filterModel, setFilterModel] = useState<FilterModel>(() => newGroup());
   const [filterOpen, setFilterOpen] = useState(false);
   const [createViewOpen, setCreateViewOpen] = useState(false);
+  const [migrationOpen, setMigrationOpen] = useState(false);
 
   // discover on cwd change
   const refreshDbs = useCallback(async () => {
@@ -57,8 +70,9 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   // load schema when a db is chosen
   useEffect(() => {
     if (!activeSource) { setSchema(null); return; }
+    setWritable(false);
     let cancel = false;
-    dbApi.schema(activeSource).then((s) => { if (!cancel) { setSchema(s); setActiveTable(s.tables[0]?.name ?? null); } })
+    dbApi.schema(activeSource).then((s) => { if (!cancel) { setSchema(s); setActiveTable(s.tables[0] ? tableKey(s.tables[0]) : null); } })
       .catch((e) => !cancel && setErr(String(e)));
     return () => { cancel = true; };
   }, [sourceKey]);
@@ -68,34 +82,42 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   // stale-closure issues inside the async loadRows. The `?` placeholders and
   // double-quoted identifier are valid for both SQLite and Postgres (the server
   // rewrites `?`→`$n` for Postgres).
-  const activeTbl: DbTable | undefined = schema?.tables.find((t) => t.name === activeTable);
-  const queryRef = useRef<{ sql: string; params: unknown[] } | null>(null);
+  const activeTbl: DbTable | undefined = schema?.tables.find((t) => tableKey(t) === activeTable);
+  const queryRef = useRef<{ sql: string; params: unknown[]; limit: number; offset: number } | null>(null);
   if (activeSource && activeTable && activeTbl) {
     const { where, params } = compileGroup(filterModel, activeTbl.columns);
-    const base = `SELECT * FROM "${activeTable.replace(/"/g, '""')}"`;
-    queryRef.current = { sql: where ? `${base} WHERE ${where} LIMIT 1000` : `${base} LIMIT 1000`, params };
+    const base = `SELECT * FROM ${tableSql(activeTbl)}`;
+    const sql = (where ? `${base} WHERE ${where}` : base) + orderBySql(sorts);
+    queryRef.current = { sql, params, limit: pageSize, offset: page * pageSize };
   } else {
     queryRef.current = null;
   }
 
-  const loadRows = useCallback(async () => {
+  const loadRows = useCallback(async (signal?: AbortSignal) => {
     if (!activeSource || !queryRef.current) return;
     setErr(null);
     try {
-      const r = await dbApi.query(activeSource, queryRef.current.sql, queryRef.current.params, 1000);
+      const q = queryRef.current;
+      const r = await dbApi.query(activeSource, q.sql, q.params, q.limit, q.offset, signal);
       setResult(r);
-    } catch (e) { setResult(null); setErr(String(e)); }
+    } catch (e) {
+      if (signal?.aborted) return;
+      setResult(null); setErr(String(e));
+    }
   }, [sourceKey]);
 
   // Fresh table → fresh filter + drop stale rows.
-  useEffect(() => { setFilterModel(newGroup()); setResult(null); }, [activeTable]);
+  useEffect(() => {
+    setFilterModel(newGroup()); setSorts([]); setPage(0); setResult(null);
+  }, [activeTable]);
 
   // Debounced reload: pane switch, db/table change, or filter edit.
   useEffect(() => {
     if (pane !== "data" || !activeSource || !activeTable) return;
-    const t = setTimeout(() => { void loadRows(); }, 150);
-    return () => clearTimeout(t);
-  }, [pane, sourceKey, activeTable, filterModel, loadRows]);
+    const controller = new AbortController();
+    const t = setTimeout(() => { void loadRows(controller.signal); }, 150);
+    return () => { clearTimeout(t); controller.abort(); };
+  }, [pane, sourceKey, activeTable, filterModel, sorts, page, pageSize, loadRows]);
 
   // auto-pick the first discovered sqlite db (Postgres requires explicit connect)
   useEffect(() => { if (!activeSource && dbs.length) setActiveSource({ kind: "sqlite", path: dbs[0].path }); }, [dbs, activeSource]);
@@ -106,34 +128,53 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
     dbApi.schema(activeSource).then(setSchema).catch((e) => setErr(String(e)));
   }, [sourceKey]);
 
+  const loadAllRows = useCallback(async () => {
+    if (!activeSource || !queryRef.current) throw new Error("No table query is active");
+    const { sql, params } = queryRef.current;
+    const columns: string[] = [];
+    const rows: Record<string, unknown>[] = [];
+    let offset = 0;
+    while (rows.length < 100_000) {
+      const pageResult = await dbApi.query(activeSource, sql, params, 5_000, offset);
+      if (!columns.length) columns.push(...pageResult.columns);
+      rows.push(...pageResult.rows);
+      if (!pageResult.hasMore) return { columns, rows };
+      offset += pageResult.rows.length;
+    }
+    throw new Error("Export exceeds the 100,000-row safety limit; narrow the filter and retry");
+  }, [sourceKey, activeTable, filterModel, sorts]);
+
   const dbChip = sourceChip(activeSource);
+  const canWrite = activeSource?.kind !== "postgres" || !activeSource.readOnly;
+  const environment = activeSource?.kind === "postgres" ? activeSource.environment : "local";
 
   return (
     <div className="flex-1 flex flex-col min-h-0 float-card overflow-hidden">
       <DbHeader cwd={cwd} dbChip={dbChip} tableCount={schema?.tables.length ?? 0}
-        writable={writable} onToggleRw={() => setWritable((w) => !w)}
+        writable={writable} canWrite={canWrite} environment={environment} onToggleRw={() => canWrite && setWritable((w) => !w)}
         onPick={() => setPickerOpen("open")} onCreate={() => setPickerOpen("create")} onRefresh={() => void refreshDbs()}
         filterOpen={filterOpen} onToggleFilter={() => setFilterOpen((v) => !v)} filterActive={groupHasActive(filterModel)}
-        canNewView={writable && !!activeSource} onNewView={() => setCreateViewOpen(true)} />
+        canNewView={writable && !!activeSource} onNewView={() => setCreateViewOpen(true)} onMigration={() => setMigrationOpen(true)} locked={dataDirty} />
 
-      <div className="flex gap-1 px-3 pt-1.5 bg-[var(--bg)]">
-        {(["structure", "data", "sql", "pragmas"] as Pane[]).map((t) => (
-          <button key={t} onClick={() => setPane(t)}
+      <div className="flex gap-1 px-3 pt-1.5 bg-[var(--bg)] overflow-x-auto shrink-0">
+        {(["structure", "data", "sql", "diagram", "insights", "pragmas"] as Pane[]).map((t) => (
+          <button key={t} onClick={() => setPane(t)} disabled={dataDirty && t !== "data"}
             className={"px-3 py-1.5 text-xs font-bold rounded-t-lg " + (pane === t ? "bg-[var(--panel)] text-[var(--text)] border border-[var(--border)] border-b-0" : "text-[var(--muted)]")}>
-            {t === "data" ? "Browse Data" : t[0].toUpperCase() + t.slice(1)}
+            {t === "data" ? "Browse Data" : t === "diagram" ? "Relationships" : t[0].toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
 
       <div className="flex-1 grid bg-[var(--panel)] border-t border-[var(--border)]" style={{ gridTemplateColumns: "212px 1fr" }}>
-        <ObjectTree schema={schema} activeTable={activeTable} onSelect={setActiveTable} />
+        <ObjectTree schema={schema} activeTable={activeTable} onSelect={setActiveTable} locked={dataDirty} />
         <div className="flex flex-col min-w-0">
           {err && <Notice variant="error" layout="inline" className="px-3 py-2 text-xs">{err}</Notice>}
           {pane === "data" && activeTbl && (
             <>
-              {filterOpen && (
+              {filterOpen && !dataDirty && (
                 <>
-                  <DatabaseFilterBuilder model={filterModel} cols={activeTbl.columns} onChange={setFilterModel} />
+                  <DatabaseFilterBuilder model={filterModel} cols={activeTbl.columns}
+                    onChange={(next) => { setFilterModel(next); setPage(0); }} />
                   <div className="px-3 py-1 border-b border-[var(--border)] bg-[var(--bg)]">
                     <span className="mono text-[11px] text-[var(--muted)]">
                       <b className="text-[var(--accent)]">WHERE</b>{" "}
@@ -142,15 +183,26 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
                   </div>
                 </>
               )}
-              <DataGrid columns={activeTbl.columns.map((c) => c.name)} result={result} />
+              <DataGrid table={activeTbl} source={activeSource!} writable={writable}
+                columns={activeTbl.columns.map((c) => c.name)} result={result}
+                sorts={sorts} pageSize={pageSize}
+                onSort={(column, additive) => { setSorts((current) => toggleSort(current, column, additive)); setPage(0); }}
+                onPrevious={() => setPage((current) => Math.max(0, current - 1))}
+                onNext={() => setPage((current) => current + 1)}
+                onPageSize={(size) => { setPageSize(size); setPage(0); }}
+                onDirtyChange={setDataDirty} onApplied={() => void loadRows()} onExportAll={loadAllRows} />
             </>
           )}
           {pane === "structure" && activeTbl && <StructurePane table={activeTbl} />}
           {pane === "pragmas" && schema && <PragmasPane pragmas={schema.pragmas} />}
-          {pane === "sql" && activeSource && <SqlPane source={activeSource} writable={writable} onExeced={reloadSchema} />}
+          {pane === "diagram" && schema && <SchemaDiagramPane schema={schema} />}
+          {pane === "insights" && activeSource && <InsightsPane source={activeSource} />}
+          {pane === "sql" && activeSource && schema && <SqlWorkspace key={sourceKey} host={host} source={activeSource} schema={schema} writable={writable} onExeced={reloadSchema} />}
           {pane === "data" && !activeTbl && <EmptyHint text="Select a table or view to browse its rows." />}
           {pane === "structure" && !activeTbl && <EmptyHint text="Select a table or view to inspect its structure." />}
           {pane === "pragmas" && !schema && <EmptyHint text="Open a database to view its pragmas." />}
+          {pane === "diagram" && !schema && <EmptyHint text="Open a database to inspect relationships." />}
+          {pane === "insights" && !activeSource && <EmptyHint text="Open a database to view operational insights." />}
           {pane === "sql" && !activeSource && <EmptyHint text="Open a database to run SQL." />}
         </div>
       </div>
@@ -164,6 +216,9 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
         <DatabaseCreateViewModal source={activeSource}
           onClose={() => setCreateViewOpen(false)} onCreated={() => { void reloadSchema(); }} />
       )}
+      {migrationOpen && activeSource && (
+        <DatabaseMigrationModal source={activeSource} onClose={() => setMigrationOpen(false)} onApplied={reloadSchema} />
+      )}
     </div>
   );
 }
@@ -172,47 +227,55 @@ function EmptyHint({ text }: { text: string }) {
   return <div className="flex-1 grid place-items-center text-[var(--faint)] text-xs px-6 text-center">{text}</div>;
 }
 
-function DbHeader({ cwd, dbChip, tableCount, writable, onToggleRw, onPick, onCreate, onRefresh, filterOpen, onToggleFilter, filterActive, canNewView, onNewView }: {
+function DbHeader({ cwd, dbChip, tableCount, writable, canWrite, environment, onToggleRw, onPick, onCreate, onRefresh, filterOpen, onToggleFilter, filterActive, canNewView, onNewView, onMigration, locked }: {
   cwd: string; dbChip: string; tableCount: number;
-  writable: boolean; onToggleRw: () => void; onPick: () => void; onCreate: () => void; onRefresh: () => void;
+  writable: boolean; canWrite: boolean; environment: string; onToggleRw: () => void; onPick: () => void; onCreate: () => void; onRefresh: () => void;
   filterOpen: boolean; onToggleFilter: () => void; filterActive: boolean;
   canNewView: boolean; onNewView: () => void;
+  onMigration: () => void;
+  locked: boolean;
 }) {
   const short = cwd ? cwd.replace(/^\/Users\/[^/]+/, "~") : "~";
   return (
     <div className="flex items-center gap-2 px-3 h-11 border-b border-[var(--border)] bg-[var(--bg)]">
       <span className="mono text-[11px] text-[var(--faint)] truncate max-w-[280px]" title={cwd}>{short}</span>
-      <button onClick={onPick}
+      <button onClick={onPick} disabled={locked}
         className="flex items-center gap-1.5 px-2.5 h-7 rounded-md border border-[var(--border-2)] hover:border-[var(--accent)] text-[var(--text)] text-xs font-semibold"
         title="Switch database">
         <DbIcon size={13} className="text-[var(--accent)]" />
         <span className="truncate max-w-[220px]">{dbChip.split("/").pop() ?? dbChip}</span>
+        <span className={"text-[9px] uppercase font-bold " + (environment === "production" ? "text-[var(--red)]" : "text-[var(--faint)]")}>{environment}</span>
         <span className="text-[var(--faint)] font-normal">{tableCount}</span>
         <ChevronDown size={13} className="text-[var(--muted)]" />
       </button>
 
       <div className="flex items-center rounded-md border border-[var(--border-2)] overflow-hidden h-7">
-        <button onClick={() => !writable && onToggleRw()}
+        <button onClick={() => !locked && writable && onToggleRw()}
           className={"px-2 text-[11px] font-semibold h-full " + (!writable ? "bg-[var(--accent)] text-[var(--panel)]" : "text-[var(--muted)]")}>Read-only</button>
-        <button onClick={() => writable && onToggleRw()}
-          className={"px-2 text-[11px] font-semibold h-full " + (writable ? "bg-[var(--accent)] text-[var(--panel)]" : "text-[var(--muted)]")}>Writable</button>
+        <button onClick={() => !locked && !writable && canWrite && onToggleRw()} disabled={!canWrite}
+          title={canWrite ? "Enable database writes" : "This connection profile is read-only"}
+          className={"px-2 text-[11px] font-semibold h-full disabled:opacity-40 " + (writable ? "bg-[var(--accent)] text-[var(--panel)]" : "text-[var(--muted)]")}>Writable</button>
       </div>
 
       <div className="ml-auto flex items-center gap-1">
-        <button onClick={onToggleFilter} title="Filter rows (Browse Data)"
+        <button onClick={onToggleFilter} disabled={locked} title="Filter rows (Browse Data)"
           className={"flex items-center gap-1 px-2.5 h-7 rounded-md text-xs font-semibold border " + (filterOpen || filterActive ? "border-[var(--accent)] text-[var(--accent)] bg-[var(--accent)]/10" : "border-[var(--border-2)] text-[var(--muted)] hover:bg-[var(--hover)]")}>
           <FilterIcon size={13} /> Filter
         </button>
-        <button onClick={onNewView} disabled={!canNewView}
+        <button onClick={onNewView} disabled={!canNewView || locked}
           title={canNewView ? "Create a new SQL view" : "Flip Read-only → Writable to create a view"}
           className={"flex items-center gap-1 px-2.5 h-7 rounded-md text-xs font-semibold " + (canNewView ? "text-[var(--accent)] hover:bg-[var(--hover)]" : "text-[var(--muted)] opacity-50 cursor-not-allowed")}>
           <Plus size={13} /> New view
         </button>
-        <button onClick={onRefresh} title="Rescan workspace"
+        <button onClick={onMigration} disabled={!canNewView || locked} title="Dry-run and apply an atomic schema migration"
+          className="px-2.5 h-7 rounded-md text-xs font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
+          Migration
+        </button>
+        <button onClick={onRefresh} disabled={locked} title="Rescan workspace"
           className="flex items-center gap-1 px-2.5 h-7 rounded-md text-xs font-semibold text-[var(--muted)] border border-[var(--border-2)] hover:bg-[var(--hover)]">
           <RefreshCw size={13} /> Refresh
         </button>
-        <button onClick={onCreate} title="Create a new database"
+        <button onClick={onCreate} disabled={locked} title="Create a new database"
           className="flex items-center gap-1 px-2.5 h-7 rounded-md text-xs font-bold bg-[var(--accent)] text-[var(--panel)]">
           <Plus size={13} /> New
         </button>
@@ -221,50 +284,79 @@ function DbHeader({ cwd, dbChip, tableCount, writable, onToggleRw, onPick, onCre
   );
 }
 
-function ObjectTree({ schema, activeTable, onSelect }: {
-  schema: DbSchema | null; activeTable: string | null; onSelect: (name: string) => void;
+export function ObjectTree({ schema, activeTable, onSelect, locked }: {
+  schema: DbSchema | null; activeTable: string | null; onSelect: (name: string) => void; locked: boolean;
 }) {
+  const [search, setSearch] = useState("");
   if (!schema) return <div className="overflow-auto p-3 text-[var(--faint)] text-xs">No database open.</div>;
-  const tables = schema.tables.filter((t) => t.type === "table");
-  const views = schema.tables.filter((t) => t.type === "view");
+  const needle = search.trim().toLowerCase();
+  const matches = (values: Array<string | undefined>) => !needle || values.some((value) => value?.toLowerCase().includes(needle));
+  const visibleTables = schema.tables.filter((table) => matches([
+    table.name, table.schema, table.type, ...table.columns.map((column) => column.name),
+  ]));
+  const schemaNames = schema.schemas?.length ? schema.schemas : [...new Set(visibleTables.map((table) => table.schema).filter(Boolean))] as string[];
+  const groups = (schemaNames.length ? schemaNames : [""]).map((name) => ({
+    name,
+    tables: visibleTables.filter((table) => (table.schema ?? "") === (name === "main" ? "" : name)),
+  })).filter((group) => group.tables.length > 0);
+  if (!groups.length && visibleTables.length) groups.push({ name: "", tables: visibleTables });
   const Section = ({ label, items, icon }: { label: string; items: DbTable[]; icon: React.ReactNode }) => (
     items.length > 0 && (
       <div className="mb-2">
         <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-[var(--faint)]">{label} ({items.length})</div>
-        {items.map((t) => (
-          <button key={t.name} onClick={() => onSelect(t.name)} title={t.ddl?.slice(0, 120)}
-            className={"w-full flex items-center gap-2 px-3 py-1 text-left text-xs " + (t.name === activeTable ? "bg-[var(--accent)]/15 text-[var(--accent)]" : "text-[var(--text)] hover:bg-[var(--hover)]")}>
+        {items.map((t) => {
+          const key = tableKey(t);
+          return (
+          <button key={key} onClick={() => onSelect(key)} disabled={locked && key !== activeTable} title={t.ddl?.slice(0, 120)}
+            className={"w-full flex items-center gap-2 px-3 py-1 text-left text-xs " + (key === activeTable ? "bg-[var(--accent)]/15 text-[var(--accent)]" : "text-[var(--text)] hover:bg-[var(--hover)]")}>
             <span className="text-[var(--muted)]">{icon}</span>
-            <span className="truncate flex-1">{t.name}</span>
+            <span className="truncate flex-1">{tableLabel(t)}</span>
+            <span className="mono text-[9px] text-[var(--faint)]">{t.columns.length}c</span>
             {t.rowCount >= 0 && <span className="mono text-[10px] text-[var(--faint)]">{t.rowCount}</span>}
           </button>
-        ))}
+          );
+        })}
       </div>
     )
   );
+  const objectRows = <T extends { name: string; schema?: string }>(label: string, items: T[], detail: (item: T) => string) => {
+    const visible = items.filter((item) => matches([item.name, item.schema, detail(item)]));
+    if (!visible.length) return null;
+    return (
+      <div className="mb-2">
+        <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-[var(--faint)]">{label} ({visible.length})</div>
+        {visible.map((item, index) => (
+          <div key={`${item.schema ?? ""}:${item.name}:${index}`} title={detail(item)} className="flex items-center gap-2 px-3 py-1 text-xs text-[var(--muted)]">
+            <span className="mono text-[9px] uppercase text-[var(--faint)]">{label.slice(0, 3)}</span>
+            <span className="truncate">{item.schema && item.schema !== "public" ? `${item.schema}.` : ""}{item.name}</span>
+          </div>
+        ))}
+      </div>
+    );
+  };
   return (
     <div className="overflow-auto border-r border-[var(--border)]">
-      <Section label="Tables" items={tables} icon={<Table2 size={12} />} />
-      <Section label="Views" items={views} icon={<Eye size={12} />} />
-      {schema.indexes.length > 0 && (
-        <div className="mb-2">
-          <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-[var(--faint)]">Indexes ({schema.indexes.length})</div>
-          {schema.indexes.map((i) => (
-            <div key={i.name} className="flex items-center gap-2 px-3 py-1 text-xs text-[var(--muted)]">
-              <span className="mono text-[10px]">idx</span><span className="truncate">{i.name}</span>
-            </div>
-          ))}
+      <label className="sticky top-0 z-10 flex items-center gap-1.5 m-2 px-2 h-7 rounded-md border border-[var(--border-2)] bg-[var(--bg)]">
+        <Search size={12} className="text-[var(--faint)]" />
+        <input aria-label="Search database objects" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find objects…"
+          className="min-w-0 w-full bg-transparent text-xs text-[var(--text)] outline-none" />
+      </label>
+      {groups.map((group) => (
+        <div key={group.name || "main"}>
+          {schemaNames.length > 1 && <div className="px-3 py-1.5 border-y border-[var(--border)] bg-[var(--bg)] mono text-[10px] font-bold text-[var(--accent)]">{group.name || "main"}</div>}
+          <Section label="Tables" items={group.tables.filter((table) => table.type === "table")} icon={<Table2 size={12} />} />
+          <Section label="Views" items={group.tables.filter((table) => table.type === "view")} icon={<Eye size={12} />} />
+          <Section label="Materialized" items={group.tables.filter((table) => table.type === "materialized_view")} icon={<Eye size={12} />} />
         </div>
-      )}
-      {schema.triggers.length > 0 && (
-        <div className="mb-2">
-          <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-[var(--faint)]">Triggers ({schema.triggers.length})</div>
-          {schema.triggers.map((t) => (
-            <div key={t.name} className="flex items-center gap-2 px-3 py-1 text-xs text-[var(--muted)]">
-              <GitBranch size={12} /><span className="truncate">{t.name}</span>
-            </div>
-          ))}
-        </div>
+      ))}
+      {objectRows("Indexes", schema.indexes, (item) => `${item.unique ? "unique " : ""}${item.table ?? ""} ${(item.columns ?? []).join(", ")}`)}
+      {objectRows("Triggers", schema.triggers, (item) => `${item.timing ?? ""} ${item.event ?? ""} ${item.table ?? ""}`)}
+      {objectRows("Constraints", schema.constraints ?? [], (item) => `${item.type} ${item.table} ${item.definition}`)}
+      {objectRows("Sequences", schema.sequences ?? [], (item) => item.definition ?? "")}
+      {objectRows("Routines", schema.routines ?? [], (item) => `${item.type ?? ""} ${item.definition ?? ""}`)}
+      {objectRows("Extensions", schema.extensions ?? [], (item) => item.definition ?? "")}
+      {needle && !visibleTables.length && !schema.indexes.some((item) => matches([item.name])) && (
+        <div className="p-3 text-xs text-[var(--faint)]">No matching objects.</div>
       )}
     </div>
   );
@@ -275,50 +367,427 @@ function TypeChip({ type }: { type: string }) {
   return <span className="mono text-[9px] px-1 rounded bg-[var(--hover)] text-[var(--muted)]">{type}</span>;
 }
 
-function DataGrid({ columns, result }: { columns: string[]; result: QueryResult | null }) {
+export function DataGrid({ table, source, writable, columns, result, sorts, pageSize, onSort, onPrevious, onNext, onPageSize, onDirtyChange, onApplied, onExportAll }: {
+  table: DbTable;
+  source: DbSource;
+  writable: boolean;
+  columns: string[];
+  result: QueryResult | null;
+  sorts: SortSpec[];
+  pageSize: number;
+  onSort: (column: string, additive: boolean) => void;
+  onPrevious: () => void;
+  onNext: () => void;
+  onPageSize: (size: number) => void;
+  onDirtyChange: (dirty: boolean) => void;
+  onApplied: () => void;
+  onExportAll: () => Promise<{ columns: string[]; rows: Record<string, unknown>[] }>;
+}) {
   const cols = result?.columns.length ? result.columns : columns;
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const [edits, setEdits] = useState<Record<string, unknown>>({});
+  const [deleted, setDeleted] = useState<Set<number>>(() => new Set());
+  const [inserts, setInserts] = useState<Record<string, unknown>[]>([]);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [insertOpen, setInsertOpen] = useState(false);
+  const [preview, setPreview] = useState<RowChangeStatement[] | null>(null);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("csv");
+  const [importOpen, setImportOpen] = useState(false);
+  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(() => new Set());
+  const [columnsOpen, setColumnsOpen] = useState(false);
+  const [inspecting, setInspecting] = useState<{ column: string; value: unknown } | null>(null);
+  useEffect(() => { setSelected(new Set()); setCopyState("idle"); }, [result]);
+
+  const rows = result?.rows ?? [];
+  const visibleCols = cols.filter((column) => !hiddenColumns.has(column));
+  const selectedRows = selected.size
+    ? rows.filter((_, index) => selected.has(index))
+    : rows;
+  const csv = () => rowsToCsv(visibleCols, selectedRows);
+  const copyCsv = async () => {
+    try {
+      await navigator.clipboard.writeText(csv());
+      setCopyState("copied");
+    } catch { setCopyState("error"); }
+  };
+  const download = (content: string, format: ExportFormat) => {
+    const mime = format === "json" ? "application/json" : format === "csv" ? "text/csv" : "text/plain";
+    const url = URL.createObjectURL(new Blob([content], { type: `${mime};charset=utf-8` }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${table.name}.${format === "markdown" ? "md" : format}`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+  const exportRows = async (all: boolean) => {
+    setTransferBusy(true); setMutationError(null);
+    try {
+      const data = all ? await onExportAll() : { columns: visibleCols, rows: selectedRows };
+      download(serializeRows(exportFormat, data.columns, data.rows, table), exportFormat);
+    } catch (error) { setMutationError(String(error)); }
+    finally { setTransferBusy(false); }
+  };
+  const allSelected = rows.length > 0 && selected.size === rows.length;
+  const first = result && rows.length ? result.offset + 1 : 0;
+  const last = result ? result.offset + rows.length : 0;
+  const primaryColumns = table.columns.filter((column) => column.pk);
+  const fallbackKey = table.uniqueKeys?.find((key) => key.length && key.every((name) => table.columns.some((column) => column.name === name && column.notNull))) ?? [];
+  const identityColumns = primaryColumns.length ? primaryColumns : fallbackKey.map((name) => table.columns.find((column) => column.name === name)!);
+  const canInsert = writable && table.type === "table";
+  const canEditRows = canInsert && identityColumns.length > 0;
+  const changes = buildRowChanges(table, rows, edits, deleted, inserts);
+  const dirty = changes.length > 0;
+  useEffect(() => {
+    onDirtyChange(dirty);
+    return () => onDirtyChange(false);
+  }, [dirty, onDirtyChange]);
+
+  const revert = () => {
+    setEdits({}); setDeleted(new Set()); setInserts([]); setEditing(null);
+    setPreview(null); setMutationError(null);
+  };
+  const review = async () => {
+    setMutationError(null);
+    try { setPreview((await dbApi.rows.preview(changes)).statements); }
+    catch (error) { setMutationError(String(error)); }
+  };
+  const apply = async () => {
+    setApplying(true); setMutationError(null);
+    try {
+      await dbApi.rows.apply(source, changes);
+      revert();
+      onApplied();
+    } catch (error) { setMutationError(String(error)); }
+    finally { setApplying(false); }
+  };
+
   return (
     <div className="flex flex-col flex-1 min-h-0">
+      <div className="relative flex flex-wrap items-center gap-1.5 px-2 py-1 border-b border-[var(--border)] bg-[var(--bg)]">
+        <button onClick={() => void copyCsv()} disabled={!rows.length}
+          className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
+          Copy CSV
+        </button>
+        <select aria-label="Export format" value={exportFormat} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}
+          className="px-1 py-1 rounded text-[11px] border border-[var(--border-2)] bg-[var(--bg)] text-[var(--muted)]">
+          <option value="csv">CSV</option><option value="json">JSON</option><option value="sql">SQL</option><option value="markdown">Markdown</option>
+        </select>
+        <button onClick={() => void exportRows(false)} disabled={!rows.length || transferBusy}
+          className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
+          Export page
+        </button>
+        <button onClick={() => void exportRows(true)} disabled={!rows.length || transferBusy || dirty}
+          className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
+          Export all
+        </button>
+        <button onClick={() => setColumnsOpen((open) => !open)} className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)]">
+          Columns {visibleCols.length}/{cols.length}
+        </button>
+        {columnsOpen && (
+          <div className="absolute top-full left-2 z-30 mt-1 w-56 max-h-64 overflow-auto rounded-lg border border-[var(--border)] bg-[var(--panel)] p-2 shadow-xl">
+            {cols.map((column) => <label key={column} className="flex items-center gap-2 px-1 py-1 text-xs text-[var(--text)]">
+              <input type="checkbox" checked={!hiddenColumns.has(column)} onChange={(event) => setHiddenColumns((current) => {
+                const next = new Set(current);
+                if (event.target.checked) next.delete(column); else if (current.size < cols.length - 1) next.add(column);
+                return next;
+              })} />
+              <span className="truncate">{column}</span>
+            </label>)}
+          </div>
+        )}
+        <span className="h-5 w-px bg-[var(--border)]" />
+        <button onClick={() => setInsertOpen(true)} disabled={!canInsert}
+          className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
+          Add row
+        </button>
+        <button onClick={() => setImportOpen(true)} disabled={!canInsert || dirty}
+          className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
+          Import CSV
+        </button>
+        <button onClick={() => { setDeleted(new Set([...deleted, ...selected])); setSelected(new Set()); }}
+          disabled={!canEditRows || selected.size === 0}
+          className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--red)] hover:bg-[var(--hover)] disabled:opacity-40">
+          Delete selected
+        </button>
+        <button onClick={() => void review()} disabled={!dirty}
+          className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--accent)] hover:bg-[var(--hover)] disabled:opacity-40">
+          Review {changes.length || ""} change{changes.length === 1 ? "" : "s"}
+        </button>
+        <button onClick={revert} disabled={!dirty}
+          className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
+          Revert
+        </button>
+        {selected.size > 0 && <span className="text-[11px] text-[var(--accent)]">{selected.size} selected</span>}
+        {copyState === "copied" && <span className="text-[11px] text-[var(--muted)]">Copied</span>}
+        {copyState === "error" && <span className="text-[11px] text-[var(--danger)]">Clipboard unavailable</span>}
+        <span className="ml-auto text-[10px] text-[var(--faint)]">
+          {canEditRows ? `Double-click a cell to edit${!primaryColumns.length ? " · using unique key" : ""}` : writable && table.type === "table" ? "Updates require a primary or non-null unique key" : "Shift-click headers for multi-sort"}
+        </span>
+      </div>
       <div className="overflow-auto flex-1">
         <table className="w-full text-xs border-collapse">
           <thead className="sticky top-0 bg-[var(--panel)] z-10">
             <tr>
-              {cols.map((c) => (
-                <th key={c} className="text-left font-semibold text-[var(--text)] px-2 py-1.5 border-b border-[var(--border)] whitespace-nowrap">
-                  {c}
+              <th className="w-8 px-2 py-1.5 border-b border-[var(--border)]">
+                <input type="checkbox" aria-label="Select all rows" checked={allSelected}
+                  onChange={(event) => setSelected(event.target.checked ? new Set(rows.map((_, i) => i)) : new Set())} />
+              </th>
+              {visibleCols.map((c) => (
+                <th key={c} className="text-left font-semibold text-[var(--text)] border-b border-[var(--border)] whitespace-nowrap">
+                  <button aria-label={`Sort by ${c}`} disabled={dirty} onClick={(event) => onSort(c, event.shiftKey)}
+                    className="w-full flex items-center gap-1 px-2 py-1.5 text-left hover:bg-[var(--hover)]">
+                    {c}
+                    {sorts.find((sort) => sort.column === c) && (
+                      <span className="text-[var(--accent)]">
+                        {sorts.find((sort) => sort.column === c)!.direction === "asc" ? "↑" : "↓"}
+                        {sorts.length > 1 ? sorts.findIndex((sort) => sort.column === c) + 1 : ""}
+                      </span>
+                    )}
+                  </button>
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {result?.rows.map((row, i) => (
-              <tr key={i} className="hover:bg-[var(--hover)]">
-                {cols.map((c) => {
+              <tr key={i} className={"hover:bg-[var(--hover)] " + (deleted.has(i) ? "opacity-50 line-through" : "")}>
+                <td className="w-8 px-2 py-1 border-b border-[var(--border)]">
+                  <input type="checkbox" aria-label={`Select row ${result.offset + i + 1}`}
+                    checked={selected.has(i)} onChange={(event) => setSelected((current) => {
+                      const next = new Set(current);
+                      if (event.target.checked) next.add(i); else next.delete(i);
+                      return next;
+                    })} />
+                </td>
+                {visibleCols.map((c) => {
                   const v = (row as Record<string, unknown>)[c];
-                  const isNull = v === null || v === undefined;
-                  const isNum = typeof v === "number";
+                  const stagedKey = editKey(i, c);
+                  const value = stagedKey in edits ? edits[stagedKey] : v;
+                  const isNull = value === null || value === undefined;
+                  const isNum = typeof value === "number";
+                  const column = table.columns.find((candidate) => candidate.name === c);
                   return (
-                    <td key={c} className={"px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)] align-top " + (isNum ? "text-right" : "")}>
-                      {isNull ? <span className="italic text-[var(--faint)]">NULL</span> : String(v)}
+                    <td key={c} onDoubleClick={() => canEditRows && !deleted.has(i) && setEditing(stagedKey)}
+                      className={"px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)] align-top " + (isNum ? "text-right " : "") + (stagedKey in edits ? "bg-[var(--accent)]/10 " : "") + (canEditRows ? "cursor-text" : "")}>
+                      {editing === stagedKey ? (
+                        <input autoFocus aria-label={`Edit row ${result.offset + i + 1} ${c}`}
+                          defaultValue={isNull ? "NULL" : String(value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") setEditing(null);
+                            if (event.key === "Enter") event.currentTarget.blur();
+                          }}
+                          onBlur={(event) => {
+                            const nextValue = coerceCellValue(event.target.value, column?.type ?? "");
+                            setEdits((current) => {
+                              const next = { ...current };
+                              if (Object.is(nextValue, v)) delete next[stagedKey]; else next[stagedKey] = nextValue;
+                              return next;
+                            });
+                            setEditing(null);
+                          }}
+                          className="w-full min-w-16 bg-[var(--bg)] border border-[var(--accent)] rounded px-1 outline-none" />
+                      ) : isNull ? <span className="italic text-[var(--faint)]">NULL</span> : (() => {
+                        const display = typeof value === "object" ? JSON.stringify(value) : String(value);
+                        return display.length > 160
+                          ? <button title="Open large value" onClick={() => setInspecting({ column: c, value })} className="max-w-80 text-left truncate text-[var(--accent)]">{display}</button>
+                          : display;
+                      })()}
                     </td>
                   );
                 })}
               </tr>
             ))}
             {result && result.rows.length === 0 && (
-              <tr><td colSpan={cols.length} className="px-2 py-6 text-center text-[var(--faint)]">No rows.</td></tr>
+              <tr><td colSpan={visibleCols.length + 1} className="px-2 py-6 text-center text-[var(--faint)]">No rows.</td></tr>
             )}
             {!result && (
-              <tr><td colSpan={cols.length} className="px-2 py-6 text-center text-[var(--faint)]">Loading…</td></tr>
+              <tr><td colSpan={visibleCols.length + 1} className="px-2 py-6 text-center text-[var(--faint)]">Loading…</td></tr>
             )}
           </tbody>
         </table>
       </div>
       {result && (
-        <div className="px-3 py-1 border-t border-[var(--border)] text-[11px] text-[var(--faint)] mono">
-          {result.rows.length} row{result.rows.length === 1 ? "" : "s"} · {result.ms}ms
+        <div className="flex items-center gap-2 px-3 py-1 border-t border-[var(--border)] text-[11px] text-[var(--faint)] mono">
+          <span>{first}–{last}{result.hasMore ? "+" : ""} · {result.ms}ms</span>
+          <button onClick={onPrevious} disabled={result.offset === 0 || dirty}
+            className="ml-auto px-2 py-0.5 rounded border border-[var(--border-2)] disabled:opacity-40">Previous</button>
+          <span>Page {Math.floor(result.offset / pageSize) + 1}</span>
+          <button onClick={onNext} disabled={!result.hasMore || dirty}
+            className="px-2 py-0.5 rounded border border-[var(--border-2)] disabled:opacity-40">Next</button>
+          <select aria-label="Rows per page" value={pageSize} disabled={dirty} onChange={(event) => onPageSize(Number(event.target.value))}
+            className="bg-[var(--bg)] border border-[var(--border-2)] rounded px-1 py-0.5">
+            {[50, 100, 250, 500].map((size) => <option key={size} value={size}>{size}/page</option>)}
+          </select>
         </div>
       )}
+      {mutationError && <Notice variant="error" layout="inline" className="px-3 py-1 text-xs">{mutationError}</Notice>}
+      {insertOpen && (
+        <InsertRowModal table={table} onClose={() => setInsertOpen(false)} onAdd={(values) => {
+          setInserts((current) => [...current, values]);
+          setInsertOpen(false);
+        }} />
+      )}
+      {importOpen && (
+        <ImportCsvModal table={table} onClose={() => setImportOpen(false)} onStage={(imported) => {
+          setInserts((current) => [...current, ...imported]);
+          setImportOpen(false);
+        }} />
+      )}
+      {preview && (
+        <RowChangesModal statements={preview} applying={applying} error={mutationError}
+          onClose={() => setPreview(null)} onApply={() => void apply()} />
+      )}
+      {inspecting && <ValueInspector column={inspecting.column} value={inspecting.value} onClose={() => setInspecting(null)} />}
+    </div>
+  );
+}
+
+function InsertRowModal({ table, onClose, onAdd }: {
+  table: DbTable;
+  onClose: () => void;
+  onAdd: (values: Record<string, unknown>) => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const submit = () => {
+    const row: Record<string, unknown> = {};
+    for (const column of table.columns) {
+      const raw = values[column.name];
+      if (raw !== undefined && raw !== "") row[column.name] = coerceCellValue(raw, column.type);
+    }
+    if (Object.keys(row).length) onAdd(row);
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div role="dialog" aria-label="Add row" className="w-[560px] max-w-[calc(100vw-2rem)] max-h-[85vh] flex flex-col rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
+          <b className="text-sm text-[var(--text)]">Add row to {tableLabel(table)}</b>
+          <button aria-label="Close add row" onClick={onClose} className="ml-auto text-[var(--muted)]">×</button>
+        </div>
+        <div className="overflow-auto p-4 grid gap-2">
+          {table.columns.map((column) => (
+            <label key={column.name} className="grid grid-cols-[140px_1fr] items-center gap-3 text-xs">
+              <span className="truncate text-[var(--muted)]" title={column.name}>{column.name}</span>
+              <input aria-label={`New ${column.name}`} value={values[column.name] ?? ""}
+                onChange={(event) => setValues((current) => ({ ...current, [column.name]: event.target.value }))}
+                placeholder={column.notNull ? column.type : `${column.type || "value"} · blank = default`}
+                className="mono min-w-0 rounded-md border border-[var(--border-2)] bg-[var(--bg)] px-2 py-1.5 text-[var(--text)] outline-none focus:border-[var(--accent)]" />
+            </label>
+          ))}
+          <span className="text-[10px] text-[var(--faint)]">Leave blank to use the database default; type NULL for SQL NULL.</span>
+        </div>
+        <div className="flex justify-end gap-2 px-4 py-3 border-t border-[var(--border)]">
+          <button onClick={onClose} className="px-3 py-1.5 text-xs font-semibold text-[var(--muted)]">Cancel</button>
+          <button onClick={submit} className="px-3 py-1.5 rounded-md text-xs font-bold bg-[var(--accent)] text-[var(--panel)]">Stage row</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportCsvModal({ table, onClose, onStage }: {
+  table: DbTable;
+  onClose: () => void;
+  onStage: (rows: Record<string, unknown>[]) => void;
+}) {
+  const [text, setText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  let preview: ReturnType<typeof parseCsv> | null = null;
+  let previewError: string | null = null;
+  try { if (text.trim()) preview = parseCsv(text); }
+  catch (parseError) { previewError = String(parseError); }
+  const stage = () => {
+    setError(null);
+    try {
+      const parsed = parseCsv(text);
+      if (!parsed.rows.length) throw new Error("CSV has no data rows");
+      if (parsed.rows.length > 500) throw new Error("Import is limited to 500 rows per transaction");
+      const known = new Map(table.columns.map((column) => [column.name, column]));
+      const unknown = parsed.columns.filter((column) => !known.has(column));
+      if (unknown.length) throw new Error(`Unknown column${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
+      onStage(parsed.rows.map((row) => Object.fromEntries(parsed.columns.map((name) => [name, coerceCellValue(row[name], known.get(name)?.type ?? "")]))));
+    } catch (stageError) { setError(String(stageError)); }
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div role="dialog" aria-label="Import CSV" className="w-[720px] max-w-[calc(100vw-2rem)] max-h-[85vh] flex flex-col rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
+          <b className="text-sm text-[var(--text)]">Import CSV into {tableLabel(table)}</b>
+          <button aria-label="Close CSV import" onClick={onClose} className="ml-auto text-[var(--muted)]">×</button>
+        </div>
+        <div className="overflow-auto p-4 grid gap-3">
+          <input aria-label="Choose CSV file" type="file" accept=".csv,text/csv" onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void file.text().then(setText).catch((readError) => setError(String(readError)));
+          }} className="text-xs text-[var(--muted)]" />
+          <textarea aria-label="CSV content" value={text} onChange={(event) => { setText(event.target.value); setError(null); }}
+            placeholder={`id,name\n1,Ada`} className="mono h-48 resize-y rounded-md border border-[var(--border-2)] bg-[var(--bg)] p-2 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]" />
+          {preview && <div className="text-xs text-[var(--muted)]">{preview.rows.length} row(s) · columns: {preview.columns.join(", ")}</div>}
+          {(error ?? previewError) && <Notice variant="error" layout="inline" className="text-xs px-2 py-1">{error ?? previewError}</Notice>}
+          <span className="text-[10px] text-[var(--faint)]">The header maps by column name. Imported rows are staged for SQL review and one atomic transaction.</span>
+        </div>
+        <div className="flex justify-end gap-2 px-4 py-3 border-t border-[var(--border)]">
+          <button onClick={onClose} className="px-3 py-1.5 text-xs font-semibold text-[var(--muted)]">Cancel</button>
+          <button onClick={stage} disabled={!text.trim()} className="px-3 py-1.5 rounded-md text-xs font-bold bg-[var(--accent)] text-[var(--panel)] disabled:opacity-40">Stage import</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ValueInspector({ column, value, onClose }: { column: string; value: unknown; onClose: () => void }) {
+  const text = typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div role="dialog" aria-label="Large value inspector" className="w-[760px] max-w-[calc(100vw-2rem)] max-h-[85vh] flex flex-col rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
+          <b className="text-sm text-[var(--text)]">{column}</b>
+          <span className="mono text-[10px] text-[var(--faint)]">{text.length.toLocaleString()} characters</span>
+          <button onClick={() => void navigator.clipboard.writeText(text).then(() => setCopied(true))} className="ml-auto px-2 py-1 text-xs text-[var(--muted)]">{copied ? "Copied" : "Copy"}</button>
+          <button aria-label="Close large value" onClick={onClose} className="text-[var(--muted)]">×</button>
+        </div>
+        <pre className="flex-1 overflow-auto whitespace-pre-wrap break-words p-4 mono text-xs text-[var(--text)]">{text}</pre>
+      </div>
+    </div>
+  );
+}
+
+function RowChangesModal({ statements, applying, error, onClose, onApply }: {
+  statements: RowChangeStatement[];
+  applying: boolean;
+  error: string | null;
+  onClose: () => void;
+  onApply: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && !applying && onClose()}>
+      <div role="dialog" aria-label="Review row changes" className="w-[680px] max-w-[calc(100vw-2rem)] max-h-[85vh] flex flex-col rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
+          <b className="text-sm text-[var(--text)]">Review {statements.length} row change{statements.length === 1 ? "" : "s"}</b>
+          <button aria-label="Close row changes" disabled={applying} onClick={onClose} className="ml-auto text-[var(--muted)]">×</button>
+        </div>
+        <div className="overflow-auto p-4 grid gap-3">
+          {statements.map((statement, index) => (
+            <div key={index} className="rounded-md border border-[var(--border)] bg-[var(--bg)] p-3">
+              <div className="text-[10px] uppercase font-bold text-[var(--accent)] mb-1">{statement.kind}</div>
+              <pre className="mono text-[11px] whitespace-pre-wrap break-words text-[var(--text)]">{statement.sql}</pre>
+              <div className="mono text-[10px] mt-2 text-[var(--faint)]">params: [{statement.params.map((value) => value === null ? "NULL" : String(value)).join(", ")}]</div>
+            </div>
+          ))}
+          {error && <Notice variant="error" layout="inline" className="text-xs px-2 py-1">{error}</Notice>}
+        </div>
+        <div className="flex justify-end gap-2 px-4 py-3 border-t border-[var(--border)]">
+          <button onClick={onClose} disabled={applying} className="px-3 py-1.5 text-xs font-semibold text-[var(--muted)]">Back</button>
+          <button onClick={onApply} disabled={applying}
+            className="px-3 py-1.5 rounded-md text-xs font-bold bg-[var(--accent)] text-[var(--panel)] disabled:opacity-40">
+            {applying ? "Applying…" : "Apply transaction"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -333,6 +802,7 @@ function StructurePane({ table }: { table: DbTable }) {
             <th className="text-left font-semibold px-2 py-1 border-b border-[var(--border)]">Name</th>
             <th className="text-left font-semibold px-2 py-1 border-b border-[var(--border)]">Type</th>
             <th className="text-left font-semibold px-2 py-1 border-b border-[var(--border)]">Notnull</th>
+            <th className="text-left font-semibold px-2 py-1 border-b border-[var(--border)]">Default</th>
             <th className="text-left font-semibold px-2 py-1 border-b border-[var(--border)]">Key</th>
           </tr>
         </thead>
@@ -343,6 +813,7 @@ function StructurePane({ table }: { table: DbTable }) {
               <td className="px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)]">{c.name}</td>
               <td className="px-2 py-1 border-b border-[var(--border)]"><TypeChip type={c.type} /></td>
               <td className="px-2 py-1 border-b border-[var(--border)] text-[var(--muted)]">{c.notNull ? "NOT NULL" : ""}</td>
+              <td className="px-2 py-1 border-b border-[var(--border)] mono text-[var(--muted)]">{c.identity ? "IDENTITY" : c.generated ? "GENERATED" : c.defaultValue ?? ""}</td>
               <td className="px-2 py-1 border-b border-[var(--border)] text-[var(--muted)]">
                 {c.pk ? <span className="text-[var(--accent)]">PK</span> : ""}
                 {c.fk ? <span className="ml-1 text-[var(--faint)]">→ {c.fk}</span> : ""}
@@ -380,75 +851,105 @@ function PragmasPane({ pragmas }: { pragmas: Record<string, string> }) {
   );
 }
 
-const WRITE_VERBS = new Set(["CREATE", "DROP", "ALTER", "INSERT", "UPDATE", "DELETE", "REPLACE", "ATTACH", "DETACH"]);
-
-function SqlPane({ source, writable, onExeced }: { source: DbSource; writable: boolean; onExeced: () => void }) {
-  const [sql, setSql] = useState("");
-  const [result, setResult] = useState<QueryResult | null>(null);
-  const [execResult, setExecResult] = useState<{ rowsAffected: number; ms: number } | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const run = async () => {
-    setBusy(true); setErr(null);
-    const verb = sql.trim().split(/\s/, 1)[0]?.toUpperCase() ?? "";
-    const isWrite = WRITE_VERBS.has(verb);
-    if (isWrite && !writable) {
-      setErr("Flip Read-only → Writable to run write statements.");
-      setBusy(false);
-      return;
-    }
-    try {
-      if (isWrite) {
-        const r = await dbApi.exec(source, sql);
-        setExecResult(r); setResult(null);
-        onExeced(); // reload schema so new tables/views appear
-      } else {
-        const r = await dbApi.query(source, sql, [], 1000);
-        setResult(r); setExecResult(null);
-      }
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
+export function SchemaDiagramPane({ schema }: { schema: DbSchema }) {
+  const [copied, setCopied] = useState(false);
+  const tables = schema.tables.filter((table) => table.type === "table");
+  const relations = schemaRelations(schema);
+  const copyMermaid = async () => {
+    await navigator.clipboard.writeText(schemaToMermaid(schema));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
   };
-
-  const cols = result?.columns ?? [];
+  if (!tables.length) return <EmptyHint text="No tables are available for a relationship diagram." />;
   return (
-    <div className="flex-1 flex flex-col min-h-0 p-3 gap-2">
-      <textarea value={sql} onChange={(e) => setSql(e.target.value)} spellCheck={false}
-        placeholder={"SELECT * FROM users LIMIT 10"}
-        className="flex-1 min-h-[120px] mono rounded-lg border border-[var(--border-2)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] resize-y" />
-      <div className="flex items-center gap-2">
-        <button onClick={run} disabled={busy || !sql.trim()}
-          className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm font-bold bg-[var(--accent)] text-[var(--panel)] disabled:opacity-40">
-          <Play size={13} /> Run
+    <div className="flex-1 min-h-0 overflow-auto p-3">
+      <div className="flex items-center gap-2 mb-3">
+        <div className="text-xs text-[var(--muted)]">{tables.length} tables · {relations.length} foreign-key relationships</div>
+        <button onClick={() => void copyMermaid()} className="ml-auto px-2.5 py-1 rounded-md border border-[var(--border-2)] text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)]">
+          {copied ? "Copied Mermaid" : "Copy Mermaid"}
         </button>
-        {!writable && <span className="text-[11px] text-[var(--faint)]">Read-only — write statements need the Writable toggle.</span>}
       </div>
-      {err && <Notice variant="error" layout="inline" className="text-xs px-2 py-1">{err}</Notice>}
-      {execResult && <div className="text-[11px] mono text-[var(--muted)]">{execResult.rowsAffected} row(s) affected · {execResult.ms}ms</div>}
-      {result && (
-        <div className="overflow-auto border border-[var(--border)] rounded-md max-h-60">
-          <table className="w-full text-xs border-collapse">
-            <thead className="sticky top-0 bg-[var(--panel)]">
-              <tr>{cols.map((c) => <th key={c} className="text-left mono font-semibold px-2 py-1 border-b border-[var(--border)] whitespace-nowrap">{c}</th>)}</tr>
-            </thead>
-            <tbody>
-              {result.rows.map((row, i) => (
-                <tr key={i} className="hover:bg-[var(--hover)]">
-                  {cols.map((c) => {
-                    const v = (row as Record<string, unknown>)[c];
-                    return <td key={c} className="mono px-2 py-1 border-b border-[var(--border)]">{v === null || v === undefined ? <span className="italic text-[var(--faint)]">NULL</span> : String(v)}</td>;
-                  })}
-                </tr>
-              ))}
-              {result.rows.length === 0 && <tr><td colSpan={cols.length} className="px-2 py-4 text-center text-[var(--faint)]">No rows.</td></tr>}
-            </tbody>
-          </table>
-        </div>
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+        {tables.map((table) => (
+          <section key={tableKey(table)} className="min-w-0 rounded-lg border border-[var(--border)] bg-[var(--bg)] overflow-hidden">
+            <div className="px-3 py-2 border-b border-[var(--border)] text-xs font-bold text-[var(--accent)]">{tableLabel(table)}</div>
+            {table.columns.map((column) => (
+              <div key={column.name} className="flex items-center gap-2 px-3 py-1 border-b border-[var(--border)] last:border-0 text-[11px]">
+                <span className="mono truncate text-[var(--text)]">{column.name}</span>
+                <span className="ml-auto mono text-[9px] text-[var(--faint)]">{column.type}</span>
+                {column.pk && <span className="text-[9px] font-bold text-[var(--accent)]">PK</span>}
+                {column.fk && <span title={column.fk} className="text-[9px] font-bold text-[var(--muted)]">FK</span>}
+              </div>
+            ))}
+          </section>
+        ))}
+      </div>
+      <div className="mt-4 text-[10px] font-bold uppercase tracking-wide text-[var(--faint)]">Relationships</div>
+      <div className="mt-1 rounded-lg border border-[var(--border)] overflow-hidden">
+        {relations.map((relation, index) => (
+          <div key={`${tableKey(relation.fromTable)}:${relation.fromColumn}:${index}`} className="flex flex-wrap gap-1 px-3 py-1.5 border-b border-[var(--border)] last:border-0 mono text-[11px] text-[var(--muted)]">
+            <span className="text-[var(--text)]">{tableLabel(relation.fromTable)}.{relation.fromColumn}</span>
+            <span>→</span><span className="text-[var(--accent)]">{relation.toTable}.{relation.toColumn}</span>
+          </div>
+        ))}
+        {!relations.length && <div className="px-3 py-3 text-xs text-[var(--faint)]">No foreign keys were found.</div>}
+      </div>
+    </div>
+  );
+}
+
+export function InsightsPane({ source }: { source: DbSource }) {
+  const [insights, setInsights] = useState<DatabaseInsights | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    setBusy(true); setError(null);
+    try { setInsights(await dbApi.insights(source)); }
+    catch (loadError) { setError(String(loadError)); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { void load(); }, [source.kind === "sqlite" ? source.path : source.connId]);
+  const formatMetric = (key: string, value: string | number) => {
+    if (key.endsWith("_bytes") && typeof value === "number") {
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let amount = value; let unit = 0;
+      while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit++; }
+      return `${amount.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+    }
+    return typeof value === "number" ? value.toLocaleString() : value;
+  };
+  return (
+    <div className="flex-1 min-h-0 overflow-auto p-3">
+      <div className="flex items-center mb-3">
+        <div className="text-xs font-bold text-[var(--text)]">Operational insights</div>
+        <button onClick={() => void load()} disabled={busy} className="ml-auto px-2.5 py-1 rounded-md border border-[var(--border-2)] text-[11px] font-semibold text-[var(--muted)] disabled:opacity-40">{busy ? "Refreshing…" : "Refresh"}</button>
+      </div>
+      {error && <Notice variant="error" layout="inline" className="mb-3 px-2 py-1 text-xs">{error}</Notice>}
+      {insights && (
+        <>
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+            {Object.entries(insights.metrics).map(([key, value]) => (
+              <div key={key} className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
+                <div className="text-[9px] font-bold uppercase tracking-wide text-[var(--faint)]">{key.replace(/_/g, " ")}</div>
+                <div className="mt-1 mono text-sm text-[var(--text)]">{formatMetric(key, value)}</div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 text-[10px] font-bold uppercase tracking-wide text-[var(--faint)]">Database activity ({insights.activity.length})</div>
+          <div className="mt-1 overflow-auto rounded-lg border border-[var(--border)]">
+            <table className="w-full text-xs border-collapse">
+              <thead><tr>{["PID", "User", "State", "Duration", "Wait", "Query"].map((label) => <th key={label} className="text-left px-2 py-1 border-b border-[var(--border)] text-[var(--faint)]">{label}</th>)}</tr></thead>
+              <tbody>{insights.activity.map((item) => <tr key={item.id}>
+                <td className="px-2 py-1 border-b border-[var(--border)] mono">{item.id}</td><td className="px-2 py-1 border-b border-[var(--border)]">{item.user}</td>
+                <td className="px-2 py-1 border-b border-[var(--border)]">{item.state}</td><td className="px-2 py-1 border-b border-[var(--border)] mono">{Math.round(item.durationMs)}ms</td>
+                <td className="px-2 py-1 border-b border-[var(--border)]">{item.wait}</td><td title={item.query} className="max-w-md truncate px-2 py-1 border-b border-[var(--border)] mono">{item.query}</td>
+              </tr>)}</tbody>
+            </table>
+            {!insights.activity.length && <div className="px-3 py-3 text-xs text-[var(--faint)]">No other active database sessions.</div>}
+          </div>
+        </>
       )}
+      {!insights && !error && <div className="text-xs text-[var(--faint)]">Loading insights…</div>}
     </div>
   );
 }

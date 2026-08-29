@@ -1,14 +1,23 @@
 # @tabterm/module-dbm
 
 The **database** module for [tabterm](https://github.com/and1truong/tabterm) (`id: dbm`) —
-a mode-rail view for browsing databases:
+a mode-rail database manager:
 
-- **SQLite** — discovers `*.db`/`*.sqlite` files under the workspace cwd; object tree
-  (tables + views), schema/DDL, indexes, triggers, pragmas.
-- **Postgres** — connect by URL via Bun's built-in client (`Bun.SQL`); remembered
-  connections are saved in tabterm's own SQLite DB (the module's `pg_connections` table).
-- **Query + browse** — read-only `SELECT` runner, a visual filter builder (WHERE
-  clauses), a raw SQL tab, and a Create View helper.
+- **SQLite + PostgreSQL** — create/discover SQLite files or connect to PostgreSQL;
+  credentials live in the OS credential manager, while profiles carry environment and
+  read-only policies.
+- **Catalog explorer** — searchable schemas, tables, views, materialized views, columns,
+  indexes, constraints, triggers, sequences, routines, extensions, DDL, and fast row estimates.
+- **Data editor** — bounded server-side paging, multi-sort/filter, row selection, staged
+  insert/update/delete, primary/unique-key identity, optimistic conflict detection, SQL review,
+  and one atomic apply transaction.
+- **SQL workspace** — CodeMirror consoles with dialect/schema completion, persisted tabs,
+  statement selection, multiple results, history, cancellation/timeouts, and query plans.
+- **Transfer + analysis** — CSV import through the staged-change workflow; full filtered export
+  as CSV, JSON, SQL, or Markdown; relationship/ER views with Mermaid export; operational metrics
+  and PostgreSQL session activity.
+- **Schema safety** — Migration Studio dry-runs DDL in a transaction and rolls it back before
+  enabling one-click atomic apply; transaction control remains owned by the runner.
 
 Extracted from the tabterm monorepo (`modules/dbm/`) into its own repository.
 
@@ -18,11 +27,11 @@ Extracted from the tabterm monorepo (`modules/dbm/`) into its own repository.
 shared.ts                  HTTP JSON shapes shared by server + client (DbSchema,
                            QueryResult, PgConnection, DbError, …)
 server.ts                  Server entry — activate(host): migration + route registration
-server/dbServer.ts         SQLite discovery/schema/query/exec + assertReadOnly
-server/pgServer.ts         Postgres half via Bun.SQL (no `pg` dependency)
-server/connections.ts      Saved Postgres-connection CRUD (host.db)
+server/dbServer.ts         SQLite discovery/catalog/query/explain/mutation/insights
+server/pgServer.ts         PostgreSQL catalog/query/explain/mutation/insights via Bun.SQL
+server/connections.ts      Profile metadata + OS-backed credential storage
 server/routeHandlers.ts    Route dispatch to the sqlite/pg core
-server/migrations.ts       v1: pg_connections table
+server/migrations.ts       pg_connections schema migrations
 src/index.tsx              Client entry — activate(host): registers the dbm rail page
 src/WorkspaceDatabaseView.tsx   The main view
 src/dbApi.ts               Typed HTTP client (/api/modules/dbm/r/*)
@@ -42,7 +51,7 @@ in tabterm for the full host API.
 ```sh
 bun install        # resolves lucide-react + links @tabterm/module-host
 bun run typecheck  # tsc --noEmit
-bun test           # sqlite/pg server + filter tests
+make check         # build + typecheck + unit tests + happy-dom UI smokes
 make build         # -> dist/modules/dbm/{client.js,server.js}
 ```
 

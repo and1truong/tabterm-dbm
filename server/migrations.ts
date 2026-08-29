@@ -4,9 +4,6 @@ export const migrations: Migration[] = [
   {
     v: 1,
     up: (db) => {
-      // Remembered Postgres connections for the dbm picker. `url` may carry a
-      // plaintext password — this is the user-chosen "remember connection"
-      // behaviour for a local-only app.
       db.exec(`CREATE TABLE IF NOT EXISTS pg_connections (
         id TEXT PRIMARY KEY,
         label TEXT NOT NULL,
@@ -14,6 +11,21 @@ export const migrations: Migration[] = [
         created_at INTEGER NOT NULL DEFAULT (unixepoch()),
         last_used_at INTEGER
       )`);
+    },
+  },
+  {
+    v: 2,
+    up: (db) => {
+      // Full credential URLs live in Bun.secrets (OS credential storage).
+      // `url` is retained as the password-free connection descriptor.
+      db.exec("ALTER TABLE pg_connections ADD COLUMN secret_name TEXT");
+    },
+  },
+  {
+    v: 3,
+    up: (db) => {
+      db.exec("ALTER TABLE pg_connections ADD COLUMN environment TEXT NOT NULL DEFAULT 'development'");
+      db.exec("ALTER TABLE pg_connections ADD COLUMN read_only INTEGER NOT NULL DEFAULT 1");
     },
   },
 ];

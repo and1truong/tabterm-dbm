@@ -4,8 +4,10 @@
 // extra dependency. Connections are opened per request and closed in a finally,
 // matching dbServer.ts's open-on-each-call SQLite pattern — no pool to manage.
 import { SQL } from "bun";
-import { assertReadOnly } from "./dbServer.ts";
-import type { DbSchema, DbTable, DbColumn, QueryResult, ExecResult } from "../shared.ts";
+import { assertReadOnlySql, boundReadSql, sqlTokens } from "./sqlSafety.ts";
+import { awaitControlled } from "./queryControl.ts";
+import { compileRowChanges, toPostgresMutationSql } from "./rowMutations.ts";
+import type { DbSchema, DbTable, DbColumn, QueryResult, ExecResult, RowChange, RowMutationResult, ConnectionTestResult, DatabaseInsights, MigrationResult } from "../shared.ts";
 import { DbError } from "../shared.ts";
 
 const DEFAULT_LIMIT = 1000;
@@ -66,7 +68,8 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
     // Tables + views in user schemas, with column lists in one shot.
     const cols = await db.unsafe(
       `SELECT c.table_schema, c.table_name, c.column_name, c.data_type,
-              c.is_nullable, c.ordinal_position,
+              c.is_nullable, c.ordinal_position, c.column_default,
+              c.is_identity, c.is_generated,
               t.table_type
          FROM information_schema.columns c
          JOIN information_schema.tables t
@@ -76,29 +79,71 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
         ORDER BY c.table_schema, c.table_name, c.ordinal_position`,
     ) as Record<string, unknown>[];
 
+    const materializedColumns = await db.unsafe(
+      `SELECT n.nspname AS table_schema, c.relname AS table_name,
+              a.attname AS column_name, format_type(a.atttypid, a.atttypmod) AS data_type,
+              CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+              a.attnum AS ordinal_position, pg_get_expr(d.adbin, d.adrelid) AS column_default,
+              'NO' AS is_identity, 'NEVER' AS is_generated,
+              'MATERIALIZED VIEW' AS table_type
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+         LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
+        WHERE c.relkind = 'm' AND n.nspname NOT IN ('pg_catalog','information_schema')
+        ORDER BY n.nspname, c.relname, a.attnum`,
+    ) as Record<string, unknown>[];
+    cols.push(...materializedColumns);
+
+    const materializedDefinitions = await db.unsafe(
+      `SELECT schemaname AS table_schema, matviewname AS table_name, definition
+         FROM pg_matviews
+        WHERE schemaname NOT IN ('pg_catalog','information_schema')`,
+    ) as Record<string, unknown>[];
+    const materializedDdl = new Map(materializedDefinitions.map((row) => [
+      `${row.table_schema}.${row.table_name}`,
+      `CREATE MATERIALIZED VIEW "${String(row.table_schema).replace(/"/g, '""')}"."${String(row.table_name).replace(/"/g, '""')}" AS\n${String(row.definition ?? "")}`,
+    ]));
+    const viewDefinitions = await db.unsafe(
+      `SELECT schemaname AS table_schema, viewname AS table_name, definition
+         FROM pg_views
+        WHERE schemaname NOT IN ('pg_catalog','information_schema')`,
+    ) as Record<string, unknown>[];
+    const viewDdl = new Map(viewDefinitions.map((row) => [
+      `${row.table_schema}.${row.table_name}`,
+      `CREATE VIEW "${String(row.table_schema).replace(/"/g, '""')}"."${String(row.table_name).replace(/"/g, '""')}" AS\n${String(row.definition ?? "")}`,
+    ]));
+
     // Primary keys and foreign-key targets, keyed by table+column.
     const keys = await db.unsafe(
-      `SELECT tc.table_schema, tc.table_name, kcu.column_name, tc.constraint_type,
+      `SELECT tc.table_schema, tc.table_name, tc.constraint_name, kcu.column_name, tc.constraint_type,
               ccu.table_name  AS ref_table,
               ccu.column_name AS ref_column
          FROM information_schema.table_constraints tc
          JOIN information_schema.key_column_usage kcu
            ON kcu.constraint_name = tc.constraint_name
           AND kcu.table_schema = tc.table_schema
+          AND kcu.table_name = tc.table_name
          LEFT JOIN information_schema.constraint_column_usage ccu
            ON ccu.constraint_name = tc.constraint_name
           AND ccu.table_schema = tc.table_schema
-        WHERE tc.constraint_type IN ('PRIMARY KEY','FOREIGN KEY')
-          AND tc.table_schema NOT IN ('pg_catalog','information_schema')`,
+        WHERE tc.constraint_type IN ('PRIMARY KEY','FOREIGN KEY','UNIQUE')
+          AND tc.table_schema NOT IN ('pg_catalog','information_schema')
+        ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position`,
     ) as Record<string, unknown>[];
 
     const pk = new Set<string>();
     const fk = new Map<string, string>();
+    const uniqueGroups = new Map<string, string[]>();
     for (const k of keys) {
       const key = `${k.table_schema}.${k.table_name}.${k.column_name}`;
       if (k.constraint_type === "PRIMARY KEY") pk.add(key);
       else if (k.constraint_type === "FOREIGN KEY" && k.ref_table)
         fk.set(key, `${k.ref_table}(${k.ref_column})`);
+      else if (k.constraint_type === "UNIQUE") {
+        const group = `${k.table_schema}.${k.table_name}.${k.constraint_name}`;
+        uniqueGroups.set(group, [...(uniqueGroups.get(group) ?? []), String(k.column_name)]);
+      }
     }
 
     // Row-count estimates from the planner stats (fast; exact COUNT(*) is slow
@@ -127,11 +172,13 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
       let tbl = byTable.get(name);
       if (!tbl) {
         const isView = c.table_type === "VIEW";
+        const isMaterialized = c.table_type === "MATERIALIZED VIEW";
         tbl = {
-          name,
-          type: isView ? "view" : "table",
+          name: bare,
+          schema,
+          type: isMaterialized ? "materialized_view" : isView ? "view" : "table",
           columns: [],
-          rowCount: isView ? -1 : (rowCount.get(`${schema}.${bare}`) ?? -1),
+          rowCount: isView || isMaterialized ? -1 : (rowCount.get(`${schema}.${bare}`) ?? -1),
           ddl: "",
         };
         byTable.set(name, tbl);
@@ -143,34 +190,107 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
         notNull: c.is_nullable === "NO",
         pk: pk.has(keyId),
         fk: fk.get(keyId) ?? null,
+        defaultValue: c.column_default == null ? null : String(c.column_default),
+        identity: c.is_identity === "YES",
+        generated: c.is_generated != null && c.is_generated !== "NEVER",
       };
       tbl.columns.push(col);
     }
     const tables = [...byTable.values()];
+    for (const table of tables) {
+      const prefix = `${table.schema}.${table.name}.`;
+      table.uniqueKeys = [...uniqueGroups.entries()].filter(([key]) => key.startsWith(prefix)).map(([, columns]) => columns);
+    }
     // Synthesize a minimal CREATE statement per table for the Structure pane's
     // DDL block (Postgres has no sqlite_master.sql equivalent).
     for (const t of tables) {
+      if (t.type === "materialized_view") {
+        t.ddl = materializedDdl.get(`${t.schema}.${t.name}`) ?? "";
+        continue;
+      }
+      if (t.type === "view") {
+        t.ddl = viewDdl.get(`${t.schema}.${t.name}`) ?? "";
+        continue;
+      }
       const body = t.columns
         .map((c) => `  "${c.name}" ${c.type}${c.notNull ? " NOT NULL" : ""}${c.pk ? " PRIMARY KEY" : ""}`)
         .join(",\n");
-      t.ddl = `CREATE ${t.type === "view" ? "VIEW" : "TABLE"} "${t.name}" (\n${body}\n);`;
+      const relation = `"${t.schema!.replace(/"/g, '""')}"."${t.name.replace(/"/g, '""')}"`;
+      t.ddl = `CREATE TABLE ${relation} (\n${body}\n);`;
     }
 
     const idx = await db.unsafe(
-      `SELECT indexname AS name, indexdef AS sql
+      `SELECT schemaname AS schema, tablename AS table_name, indexname AS name, indexdef AS sql
          FROM pg_indexes
         WHERE schemaname NOT IN ('pg_catalog','information_schema')
         ORDER BY indexname`,
     ) as Record<string, unknown>[];
-    const indexes = idx.map((r) => ({ name: String(r.name), sql: String(r.sql ?? "") }));
+    const indexes = idx.map((r) => ({
+      name: String(r.name), schema: String(r.schema), table: String(r.table_name),
+      unique: /\bUNIQUE\b/i.test(String(r.sql ?? "")), sql: String(r.sql ?? ""),
+    }));
 
     const trg = await db.unsafe(
-      `SELECT DISTINCT trigger_name AS name, action_statement AS sql
+      `SELECT DISTINCT trigger_schema AS schema, event_object_table AS table_name,
+              trigger_name AS name, action_timing AS timing, event_manipulation AS event,
+              action_statement AS sql
          FROM information_schema.triggers
         WHERE trigger_schema NOT IN ('pg_catalog','information_schema')
         ORDER BY trigger_name`,
     ) as Record<string, unknown>[];
-    const triggers = trg.map((r) => ({ name: String(r.name), sql: String(r.sql ?? "") }));
+    const triggers = trg.map((r) => ({
+      name: String(r.name), schema: String(r.schema), table: String(r.table_name),
+      timing: String(r.timing), event: String(r.event), sql: String(r.sql ?? ""),
+    }));
+
+    const constraintRows = await db.unsafe(
+      `SELECT n.nspname AS schema, c.relname AS table_name, con.conname AS name,
+              CASE con.contype WHEN 'p' THEN 'PRIMARY KEY' WHEN 'f' THEN 'FOREIGN KEY'
+                WHEN 'u' THEN 'UNIQUE' WHEN 'c' THEN 'CHECK' WHEN 'x' THEN 'EXCLUDE' ELSE con.contype::text END AS type,
+              pg_get_constraintdef(con.oid, true) AS definition,
+              COALESCE(ARRAY(SELECT a.attname FROM unnest(con.conkey) WITH ORDINALITY AS key(attnum, ord)
+                JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = key.attnum ORDER BY key.ord), ARRAY[]::name[]) AS columns
+         FROM pg_constraint con
+         JOIN pg_class c ON c.oid = con.conrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+        ORDER BY n.nspname, c.relname, con.conname`,
+    ) as Record<string, unknown>[];
+    const constraints = constraintRows.map((row) => ({
+      name: String(row.name), schema: String(row.schema), table: String(row.table_name), type: String(row.type),
+      columns: Array.isArray(row.columns) ? row.columns.map(String) : [], definition: String(row.definition ?? ""),
+    }));
+
+    const sequenceRows = await db.unsafe(
+      `SELECT sequence_schema AS schema, sequence_name AS name, data_type,
+              start_value, minimum_value, maximum_value, increment
+         FROM information_schema.sequences
+        WHERE sequence_schema NOT IN ('pg_catalog','information_schema')
+        ORDER BY sequence_schema, sequence_name`,
+    ) as Record<string, unknown>[];
+    const sequences = sequenceRows.map((row) => ({
+      name: String(row.name), schema: String(row.schema),
+      definition: `${row.data_type} · start ${row.start_value} · increment ${row.increment}`,
+    }));
+
+    const routineRows = await db.unsafe(
+      `SELECT n.nspname AS schema,
+              p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS name,
+              CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS type,
+              pg_get_functiondef(p.oid) AS definition
+         FROM pg_proc p
+         JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+        ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)`,
+    ) as Record<string, unknown>[];
+    const routines = routineRows.map((row) => ({
+      name: String(row.name), schema: String(row.schema), type: String(row.type), definition: String(row.definition ?? ""),
+    }));
+
+    const extensionRows = await db.unsafe(
+      `SELECT extname AS name, extversion AS version FROM pg_extension ORDER BY extname`,
+    ) as Record<string, unknown>[];
+    const extensions = extensionRows.map((row) => ({ name: String(row.name), definition: String(row.version ?? "") }));
 
     // Postgres has no pragmas; surface server metadata in the same kv shape so
     // the existing PragmasPane renders it unchanged.
@@ -189,7 +309,8 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
       server_version: String(m.server_version ?? ""),
     };
 
-    return { tables, indexes, triggers, pragmas };
+    const schemas = [...new Set(tables.map((table) => table.schema).filter((value): value is string => !!value))].sort();
+    return { tables, schemas, indexes, triggers, constraints, sequences, routines, extensions, pragmas };
   } catch (e) {
     if (e instanceof DbError) throw e;
     throw new DbError("not_a_database", e instanceof Error ? e.message : String(e));
@@ -198,21 +319,74 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
   }
 }
 
-export async function runPgQuery(url: string, sql: string, params: unknown[], limitRaw?: number): Promise<QueryResult> {
-  assertReadOnly(sql);
+export async function runPgQuery(
+  url: string,
+  sql: string,
+  params: unknown[],
+  limitRaw?: number,
+  offsetRaw?: number,
+  signal?: AbortSignal,
+  timeoutRaw?: number,
+): Promise<QueryResult> {
   const limit = Math.min(Math.max(limitRaw ?? DEFAULT_LIMIT, 1), HARD_LIMIT);
+  const offset = Math.max(Math.floor(offsetRaw ?? 0), 0);
+  const timeoutMs = Math.min(Math.max(Math.floor(timeoutRaw ?? 30_000), 1_000), 300_000);
+  const boundedSql = boundReadSql(sql, limit, offset);
   const db = open(url);
+  const connection = await db.reserve();
+  let inTransaction = false;
   try {
+    await connection.unsafe("BEGIN READ ONLY");
+    inTransaction = true;
+    await connection.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
     const t0 = performance.now();
     let rows: Record<string, unknown>[];
     try {
-      rows = await db.unsafe(toPgPlaceholders(sql), params) as Record<string, unknown>[];
+      const query = connection.unsafe(toPgPlaceholders(boundedSql), params);
+      rows = await awaitControlled(query, signal, timeoutMs) as Record<string, unknown>[];
     } catch (e) {
+      if (e instanceof DbError) throw e;
       throw new DbError("sql", e instanceof Error ? e.message : String(e));
     }
     const ms = Math.round((performance.now() - t0) * 10) / 10;
-    return { columns: columnsOf(rows), rows: rows.slice(0, limit), ms };
+    return { columns: columnsOf(rows), rows: rows.slice(0, limit), ms, hasMore: rows.length > limit, offset };
   } finally {
+    if (inTransaction) await connection.unsafe("ROLLBACK").catch(() => {});
+    connection.release();
+    await db.close().catch(() => {});
+  }
+}
+
+export async function explainPgQuery(
+  url: string,
+  sql: string,
+  params: unknown[],
+  signal?: AbortSignal,
+  timeoutRaw?: number,
+): Promise<QueryResult> {
+  const normalized = assertReadOnlySql(sql);
+  const timeoutMs = Math.min(Math.max(Math.floor(timeoutRaw ?? 30_000), 1_000), 300_000);
+  const db = open(url);
+  const connection = await db.reserve();
+  let inTransaction = false;
+  try {
+    await connection.unsafe("BEGIN READ ONLY");
+    inTransaction = true;
+    await connection.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    const t0 = performance.now();
+    const result = await awaitControlled(
+      connection.unsafe(`EXPLAIN (FORMAT JSON, ANALYZE FALSE, COSTS TRUE) ${toPgPlaceholders(normalized)}`, params),
+      signal,
+      timeoutMs,
+    ) as Record<string, unknown>[];
+    const rows = result.map((row) => ({ plan: JSON.stringify(row["QUERY PLAN"] ?? row, null, 2) }));
+    return { columns: ["plan"], rows, ms: Math.round((performance.now() - t0) * 10) / 10, hasMore: false, offset: 0 };
+  } catch (error) {
+    if (error instanceof DbError) throw error;
+    throw new DbError("sql", error instanceof Error ? error.message : String(error));
+  } finally {
+    if (inTransaction) await connection.unsafe("ROLLBACK").catch(() => {});
+    connection.release();
     await db.close().catch(() => {});
   }
 }
@@ -231,6 +405,137 @@ export async function runPgExec(url: string, sql: string): Promise<ExecResult> {
     const ms = Math.round((performance.now() - t0) * 10) / 10;
     return { rowsAffected, ms };
   } finally {
+    await db.close().catch(() => {});
+  }
+}
+
+export async function runPgMigration(url: string, sql: string, apply: boolean, timeoutRaw?: number): Promise<MigrationResult> {
+  const script = sql.trim();
+  if (!script) throw new DbError("sql", "migration is empty");
+  if (script.length > 1_000_000) throw new DbError("sql", "migration exceeds the 1 MB limit");
+  const forbidden = sqlTokens(script).find((token) => ["BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE"].includes(token));
+  if (forbidden) throw new DbError("sql", `transaction control (${forbidden}) is managed by the migration runner`);
+  const timeoutMs = Math.min(Math.max(Math.floor(timeoutRaw ?? 30_000), 1_000), 300_000);
+  const db = open(url);
+  const connection = await db.reserve();
+  const t0 = performance.now();
+  let transaction = false;
+  try {
+    await connection.unsafe("BEGIN");
+    transaction = true;
+    await connection.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    await connection.unsafe(script);
+    await connection.unsafe(apply ? "COMMIT" : "ROLLBACK");
+    transaction = false;
+    return { validated: true, applied: apply, ms: Math.round((performance.now() - t0) * 10) / 10 };
+  } catch (error) {
+    if (error instanceof DbError) throw error;
+    throw new DbError("sql", error instanceof Error ? error.message : String(error));
+  } finally {
+    if (transaction) await connection.unsafe("ROLLBACK").catch(() => {});
+    connection.release();
+    await db.close().catch(() => {});
+  }
+}
+
+export async function testPgConnection(url: string, signal?: AbortSignal): Promise<ConnectionTestResult> {
+  const db = open(url);
+  const connection = await db.reserve();
+  const t0 = performance.now();
+  try {
+    const rows = await awaitControlled(connection.unsafe(
+      `SELECT current_database() AS database, current_user AS "user",
+              current_setting('server_version') AS server_version`,
+    ), signal, 10_000) as Record<string, unknown>[];
+    const row = rows[0] ?? {};
+    return {
+      database: String(row.database ?? ""),
+      user: String(row.user ?? ""),
+      serverVersion: String(row.server_version ?? ""),
+      ms: Math.round((performance.now() - t0) * 10) / 10,
+    };
+  } catch (error) {
+    if (error instanceof DbError) throw error;
+    throw new DbError("not_a_database", error instanceof Error ? error.message : String(error));
+  } finally {
+    connection.release();
+    await db.close().catch(() => {});
+  }
+}
+
+export async function readPgInsights(url: string): Promise<DatabaseInsights> {
+  const db = open(url);
+  try {
+    const stats = await db.unsafe(
+      `SELECT pg_database_size(current_database())::bigint AS database_bytes,
+              numbackends AS connections, xact_commit, xact_rollback,
+              blks_read, blks_hit, temp_bytes::bigint, deadlocks
+         FROM pg_stat_database WHERE datname = current_database()`,
+    ) as Record<string, unknown>[];
+    const active = await db.unsafe(
+      `SELECT pid::text AS id, COALESCE(usename, '') AS "user", state,
+              COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - query_start)) * 1000, 0)::bigint AS duration_ms,
+              COALESCE(wait_event_type || ':' || wait_event, '') AS wait,
+              LEFT(query, 500) AS query
+         FROM pg_stat_activity
+        WHERE datname = current_database() AND pid <> pg_backend_pid()
+        ORDER BY query_start NULLS LAST`,
+    ) as Record<string, unknown>[];
+    const row = stats[0] ?? {};
+    const metrics = Object.fromEntries(Object.entries(row).map(([key, value]) => [key, typeof value === "bigint" ? Number(value) : value as string | number]));
+    return {
+      metrics,
+      activity: active.map((item) => ({
+        id: String(item.id), user: String(item.user ?? ""), state: String(item.state ?? ""),
+        durationMs: Number(item.duration_ms ?? 0), wait: String(item.wait ?? ""), query: String(item.query ?? ""),
+      })),
+    };
+  } catch (error) {
+    throw new DbError("sql", error instanceof Error ? error.message : String(error));
+  } finally { await db.close().catch(() => {}); }
+}
+
+export async function runPgRowChanges(
+  url: string,
+  changes: RowChange[],
+  signal?: AbortSignal,
+  timeoutMs = 30_000,
+): Promise<RowMutationResult> {
+  const statements = compileRowChanges(changes);
+  const db = open(url);
+  const connection = await db.reserve();
+  const t0 = performance.now();
+  let inTransaction = false;
+  try {
+    await connection.unsafe("BEGIN");
+    inTransaction = true;
+    await connection.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    let rowsAffected = 0;
+    for (const statement of statements) {
+      let rows: unknown[];
+      try {
+        rows = await awaitControlled(
+          connection.unsafe(toPostgresMutationSql(statement.sql), statement.params),
+          signal,
+          timeoutMs,
+        ) as unknown[];
+      } catch (error) {
+        if (error instanceof DbError) throw error;
+        throw new DbError("sql", error instanceof Error ? error.message : String(error));
+      }
+      const affected = affectedOf(rows);
+      if (affected !== 1) {
+        throw new DbError("conflict", `${statement.kind} expected one row but matched ${affected}`);
+      }
+      rowsAffected += affected;
+    }
+    await connection.unsafe("COMMIT");
+    inTransaction = false;
+    const ms = Math.round((performance.now() - t0) * 10) / 10;
+    return { applied: statements.length, rowsAffected, ms };
+  } finally {
+    if (inTransaction) await connection.unsafe("ROLLBACK").catch(() => {});
+    connection.release();
     await db.close().catch(() => {});
   }
 }
