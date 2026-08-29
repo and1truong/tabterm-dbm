@@ -9,6 +9,7 @@ import { awaitControlled } from "./queryControl.ts";
 import { compileRowChanges, toPostgresMutationSql } from "./rowMutations.ts";
 import type { DbSchema, DbTable, DbColumn, QueryResult, ExecResult, RowChange, RowMutationResult, ConnectionTestResult, DatabaseInsights, MigrationResult } from "../shared.ts";
 import { DbError } from "../shared.ts";
+import { encodeDbValue } from "../binaryValues.ts";
 
 const DEFAULT_LIMIT = 1000;
 const HARD_LIMIT = 10000;
@@ -38,15 +39,57 @@ function affectedOf(rows: unknown[]): number {
   return typeof n === "number" ? n : 0;
 }
 
+export function collectPgKeyMetadata(rows: Record<string, unknown>[]) {
+  const primary = new Set<string>();
+  const foreign = new Map<string, string>();
+  const uniqueGroups = new Map<string, string[]>();
+  for (const row of rows) {
+    const schema = String(row.table_schema);
+    const table = String(row.table_name);
+    const column = String(row.column_name);
+    const key = `${schema}.${table}.${column}`;
+    if (row.constraint_type === "PRIMARY KEY") primary.add(key);
+    else if (row.constraint_type === "FOREIGN KEY" && row.ref_table) {
+      const refSchema = String(row.ref_schema ?? "");
+      const refTable = `${refSchema && refSchema !== "public" ? `${refSchema}.` : ""}${String(row.ref_table)}`;
+      foreign.set(key, `${refTable}(${String(row.ref_column)})`);
+    } else if (row.constraint_type === "UNIQUE") {
+      const group = `${schema}.${table}.${String(row.constraint_name)}`;
+      uniqueGroups.set(group, [...(uniqueGroups.get(group) ?? []), column]);
+    }
+  }
+  return { primary, foreign, uniqueGroups };
+}
+
 // The client's filter compiler (dbFilter.ts) emits SQLite-style `?` placeholders;
 // Postgres needs `$1,$2,…`. Rewrite positionally, skipping `?` inside single- or
 // double-quoted string/identifier literals so SQL-pane queries stay intact.
-export function toPgPlaceholders(sql: string): string {
+export function toPgPlaceholders(sql: string, parameterCount = Number.POSITIVE_INFINITY): string {
+  if (parameterCount === 0) return sql;
   let out = "";
   let n = 0;
   let quote: '"' | "'" | null = null;
+  let lineComment = false;
+  let blockComment = false;
+  let dollarTag: string | null = null;
+  const placeholderPrefixes = new Set([
+    "AND", "AS", "BETWEEN", "BY", "CASE", "ELSE", "HAVING", "ILIKE", "IN", "IS",
+    "LIKE", "LIMIT", "NOT", "OFFSET", "ON", "OR", "RETURNING", "SELECT", "SET", "THEN",
+    "VALUES", "WHEN", "WHERE",
+  ]);
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
+    if (lineComment) { out += ch; if (ch === "\n") lineComment = false; continue; }
+    if (blockComment) {
+      out += ch;
+      if (ch === "*" && sql[i + 1] === "/") { out += sql[++i]; blockComment = false; }
+      continue;
+    }
+    if (dollarTag) {
+      if (sql.startsWith(dollarTag, i)) { out += dollarTag; i += dollarTag.length - 1; dollarTag = null; }
+      else out += ch;
+      continue;
+    }
     if (quote) {
       out += ch;
       if (ch === quote) {
@@ -55,8 +98,23 @@ export function toPgPlaceholders(sql: string): string {
       }
       continue;
     }
+    if (ch === "-" && sql[i + 1] === "-") { out += "--"; i++; lineComment = true; continue; }
+    if (ch === "/" && sql[i + 1] === "*") { out += "/*"; i++; blockComment = true; continue; }
     if (ch === '"' || ch === "'") { quote = ch; out += ch; continue; }
-    if (ch === "?") { out += "$" + ++n; continue; }
+    if (ch === "$") {
+      const tag = sql.slice(i).match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/)?.[0];
+      if (tag) { out += tag; i += tag.length - 1; dollarTag = tag; continue; }
+    }
+    if (ch === "?" && n < parameterCount) {
+      if (sql[i + 1] === "|" || sql[i + 1] === "&") { out += ch; continue; }
+      const before = sql.slice(0, i);
+      const previousChar = before.match(/\S(?=\s*$)/)?.[0] ?? "";
+      const previousWord = before.match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/)?.[1]?.toUpperCase() ?? "";
+      const looksLikeOperator = /[A-Za-z0-9_$\])'"`]/.test(previousChar) && !placeholderPrefixes.has(previousWord);
+      if (looksLikeOperator) { out += ch; continue; }
+      out += "$" + ++n;
+      continue;
+    }
     out += ch;
   }
   return out;
@@ -116,35 +174,24 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
 
     // Primary keys and foreign-key targets, keyed by table+column.
     const keys = await db.unsafe(
-      `SELECT tc.table_schema, tc.table_name, tc.constraint_name, kcu.column_name, tc.constraint_type,
-              ccu.table_name  AS ref_table,
-              ccu.column_name AS ref_column
-         FROM information_schema.table_constraints tc
-         JOIN information_schema.key_column_usage kcu
-           ON kcu.constraint_name = tc.constraint_name
-          AND kcu.table_schema = tc.table_schema
-          AND kcu.table_name = tc.table_name
-         LEFT JOIN information_schema.constraint_column_usage ccu
-           ON ccu.constraint_name = tc.constraint_name
-          AND ccu.table_schema = tc.table_schema
-        WHERE tc.constraint_type IN ('PRIMARY KEY','FOREIGN KEY','UNIQUE')
-          AND tc.table_schema NOT IN ('pg_catalog','information_schema')
-        ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position`,
+      `SELECT n.nspname AS table_schema, rel.relname AS table_name, con.conname AS constraint_name,
+              src.attname AS column_name,
+              CASE con.contype WHEN 'p' THEN 'PRIMARY KEY' WHEN 'f' THEN 'FOREIGN KEY' ELSE 'UNIQUE' END AS constraint_type,
+              ref_n.nspname AS ref_schema, ref_rel.relname AS ref_table, ref.attname AS ref_column
+         FROM pg_constraint con
+         JOIN pg_class rel ON rel.oid = con.conrelid
+         JOIN pg_namespace n ON n.oid = rel.relnamespace
+         JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS src_key(attnum, ord) ON true
+         JOIN pg_attribute src ON src.attrelid = con.conrelid AND src.attnum = src_key.attnum
+         LEFT JOIN pg_class ref_rel ON ref_rel.oid = con.confrelid
+         LEFT JOIN pg_namespace ref_n ON ref_n.oid = ref_rel.relnamespace
+         LEFT JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS ref_key(attnum, ord) ON ref_key.ord = src_key.ord
+         LEFT JOIN pg_attribute ref ON ref.attrelid = con.confrelid AND ref.attnum = ref_key.attnum
+        WHERE con.contype IN ('p','f','u') AND n.nspname NOT IN ('pg_catalog','information_schema')
+        ORDER BY n.nspname, rel.relname, con.conname, src_key.ord`,
     ) as Record<string, unknown>[];
 
-    const pk = new Set<string>();
-    const fk = new Map<string, string>();
-    const uniqueGroups = new Map<string, string[]>();
-    for (const k of keys) {
-      const key = `${k.table_schema}.${k.table_name}.${k.column_name}`;
-      if (k.constraint_type === "PRIMARY KEY") pk.add(key);
-      else if (k.constraint_type === "FOREIGN KEY" && k.ref_table)
-        fk.set(key, `${k.ref_table}(${k.ref_column})`);
-      else if (k.constraint_type === "UNIQUE") {
-        const group = `${k.table_schema}.${k.table_name}.${k.constraint_name}`;
-        uniqueGroups.set(group, [...(uniqueGroups.get(group) ?? []), String(k.column_name)]);
-      }
-    }
+    const { primary: pk, foreign: fk, uniqueGroups } = collectPgKeyMetadata(keys);
 
     // Row-count estimates from the planner stats (fast; exact COUNT(*) is slow
     // on large tables). -1 where unknown, matching SQLite views.
@@ -342,14 +389,15 @@ export async function runPgQuery(
     const t0 = performance.now();
     let rows: Record<string, unknown>[];
     try {
-      const query = connection.unsafe(toPgPlaceholders(boundedSql), params);
+      const query = connection.unsafe(toPgPlaceholders(boundedSql, params.length), params);
       rows = await awaitControlled(query, signal, timeoutMs) as Record<string, unknown>[];
     } catch (e) {
       if (e instanceof DbError) throw e;
       throw new DbError("sql", e instanceof Error ? e.message : String(e));
     }
     const ms = Math.round((performance.now() - t0) * 10) / 10;
-    return { columns: columnsOf(rows), rows: rows.slice(0, limit), ms, hasMore: rows.length > limit, offset };
+    const wireRows = rows.slice(0, limit).map((row) => Object.fromEntries(Object.entries(row).map(([column, value]) => [column, encodeDbValue(value)])));
+    return { columns: columnsOf(rows), rows: wireRows, ms, hasMore: rows.length > limit, offset };
   } finally {
     if (inTransaction) await connection.unsafe("ROLLBACK").catch(() => {});
     connection.release();
@@ -375,7 +423,7 @@ export async function explainPgQuery(
     await connection.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
     const t0 = performance.now();
     const result = await awaitControlled(
-      connection.unsafe(`EXPLAIN (FORMAT JSON, ANALYZE FALSE, COSTS TRUE) ${toPgPlaceholders(normalized)}`, params),
+      connection.unsafe(`EXPLAIN (FORMAT JSON, ANALYZE FALSE, COSTS TRUE) ${toPgPlaceholders(normalized, params.length)}`, params),
       signal,
       timeoutMs,
     ) as Record<string, unknown>[];

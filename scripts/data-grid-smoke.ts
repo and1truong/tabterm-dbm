@@ -123,7 +123,12 @@ async function exercise(width: number) {
   addRow?.click();
   await settle();
   if (!byLabel("Close add row")) fail(`${width}px: add-row modal is not visible`);
-  byLabel("Close add row")!.click();
+  const stageDefault = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Stage row");
+  stageDefault?.click();
+  await settle();
+  if (![...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: default-values row was not staged`);
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Revert")?.click();
+  await settle();
 
   const importCsv = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Import CSV");
   importCsv?.click();

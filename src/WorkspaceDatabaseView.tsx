@@ -18,12 +18,18 @@ import { parseCsv, serializeRows } from "./dataTransfer.ts";
 import type { ExportFormat } from "./dataTransfer.ts";
 import { schemaRelations, schemaToMermaid } from "./schemaDiagram.ts";
 import { DatabaseMigrationModal } from "./DatabaseMigrationModal.tsx";
+import { binaryByteLength, isDbBinaryValue } from "../binaryValues.ts";
 
 // Short label for the database chip in the header.
 function sourceChip(src: DbSource | null): string {
   if (!src) return "(no database)";
   if (src.kind === "sqlite") return src.path.split("/").pop() ?? src.path;
   return src.label;
+}
+
+function displayDbValue(value: unknown): string {
+  if (isDbBinaryValue(value)) return `<binary ${binaryByteLength(value).toLocaleString()} bytes>`;
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
 type Pane = "structure" | "data" | "sql" | "diagram" | "insights" | "pragmas";
@@ -591,7 +597,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                           }}
                           className="w-full min-w-16 bg-[var(--bg)] border border-[var(--accent)] rounded px-1 outline-none" />
                       ) : isNull ? <span className="italic text-[var(--faint)]">NULL</span> : (() => {
-                        const display = typeof value === "object" ? JSON.stringify(value) : String(value);
+                        const display = displayDbValue(value);
                         return display.length > 160
                           ? <button title="Open large value" onClick={() => setInspecting({ column: c, value })} className="max-w-80 text-left truncate text-[var(--accent)]">{display}</button>
                           : display;
@@ -658,7 +664,7 @@ function InsertRowModal({ table, onClose, onAdd }: {
       const raw = values[column.name];
       if (raw !== undefined && raw !== "") row[column.name] = coerceCellValue(raw, column.type);
     }
-    if (Object.keys(row).length) onAdd(row);
+    onAdd(row);
   };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>
@@ -739,7 +745,9 @@ function ImportCsvModal({ table, onClose, onStage }: {
 }
 
 function ValueInspector({ column, value, onClose }: { column: string; value: unknown; onClose: () => void }) {
-  const text = typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
+  const text = isDbBinaryValue(value)
+    ? `Binary value (${binaryByteLength(value).toLocaleString()} bytes)\n\nBase64:\n${value.__tabtermDbmBinary}`
+    : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
   const [copied, setCopied] = useState(false);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>

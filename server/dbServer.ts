@@ -6,6 +6,7 @@ import type { DbFile, DbSchema, DbTable, DbColumn, QueryResult, ExecResult, RowC
 import { DbError } from "../shared.ts";
 import { assertReadOnlySql, boundReadSql, sqlTokens } from "./sqlSafety.ts";
 import { compileRowChanges } from "./rowMutations.ts";
+import { encodeDbValue } from "../binaryValues.ts";
 export { DbError } from "../shared.ts";
 
 // Recursive-discovery ignore set. Matched against directory base names only.
@@ -31,14 +32,22 @@ function openRead(path: string): Database {
   let st;
   try { st = statSync(path); } catch { throw new DbError("not_found", "database file not found"); }
   if (!st.isFile()) throw new DbError("not_found", "not a file");
-  try { return new Database(path, { readonly: true }); }
+  try {
+    const db = new Database(path, { readonly: true });
+    db.exec("PRAGMA foreign_keys = ON");
+    return db;
+  }
   catch { throw new DbError("not_a_database", "could not open as sqlite (read-only)"); }
 }
 function openWrite(path: string): Database {
   let st;
   try { st = statSync(path); } catch { throw new DbError("not_found", "database file not found"); }
   if (!st.isFile()) throw new DbError("not_found", "not a file");
-  try { return new Database(path); }
+  try {
+    const db = new Database(path);
+    db.exec("PRAGMA foreign_keys = ON");
+    return db;
+  }
   catch { throw new DbError("not_a_database", "could not open as sqlite (read/write)"); }
 }
 
@@ -226,7 +235,8 @@ export function runQuery(pathRaw: string, sql: string, params: unknown[], limitR
     catch (e) { throw new DbError("sql", e instanceof Error ? e.message : String(e)); }
     if (!columns.length && rows.length) columns = Object.keys(rows[0]);
     const ms = Math.round((performance.now() - t0) * 10) / 10;
-    return { columns, rows: rows.slice(0, limit), ms, hasMore: rows.length > limit, offset };
+    const wireRows = rows.slice(0, limit).map((row) => Object.fromEntries(Object.entries(row).map(([column, value]) => [column, encodeDbValue(value)])));
+    return { columns, rows: wireRows, ms, hasMore: rows.length > limit, offset };
   } finally {
     db.close();
   }

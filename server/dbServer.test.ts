@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { isDbBinaryValue } from "../binaryValues.ts";
 import {
   discoverDatabases,
   readSchema,
@@ -83,6 +84,7 @@ describe("readSchema", () => {
     expect(s.tables.find((table) => table.name === "accounts")?.uniqueKeys).toEqual([["email"]]);
     expect(s.tables.find((table) => table.name === "posts")?.columns.find((column) => column.name === "status")?.defaultValue).toBe("'draft'");
     expect(s.pragmas.journal_mode).toBeTruthy();
+    expect(s.pragmas.foreign_keys).toBe("1");
   });
 
   test("throws not_found for a missing file", () => {
@@ -142,6 +144,20 @@ describe("runQuery", () => {
     expect(result.rows.some((row) => row.name === "email")).toBe(true);
   });
 
+  test("round-trips BLOB values through optimistic update predicates", () => {
+    const path = join(dir, "blobs.db");
+    const db = new Database(path, { create: true });
+    db.exec("CREATE TABLE files (id INTEGER PRIMARY KEY, name TEXT NOT NULL, content BLOB NOT NULL)");
+    db.query("INSERT INTO files VALUES (?, ?, ?)").run(1, "before", new Uint8Array([0, 127, 255]));
+    db.close();
+    const row = runQuery(path, "SELECT * FROM files", [], 10).rows[0];
+    expect(isDbBinaryValue(row.content)).toBe(true);
+    expect(runRowChanges(path, [{
+      kind: "update", table: { name: "files" }, key: { id: 1 }, expected: row, values: { name: "after" },
+    }]).rowsAffected).toBe(1);
+    expect(runQuery(path, "SELECT name FROM files", [], 10).rows[0].name).toBe("after");
+  });
+
   test("rejects a write statement", () => {
     seed(join(dir, "app.db"));
     expect(() => runQuery(join(dir, "app.db"), "DELETE FROM users", [], 100)).toThrow(DbError);
@@ -182,6 +198,12 @@ describe("runExec", () => {
     const q = runQuery(join(dir, "app.db"), "SELECT COUNT(*) AS n FROM adults", [], 100);
     expect(Number(q.rows[0].n)).toBe(1);
   });
+
+  test("enforces declared foreign keys on every write connection", () => {
+    const path = join(dir, "app.db");
+    seed(path);
+    expect(() => runExec(path, "INSERT INTO posts (id, user_id) VALUES (1, 999)")).toThrow(DbError);
+  });
 });
 
 describe("runMigration", () => {
@@ -204,6 +226,15 @@ describe("runMigration", () => {
 });
 
 describe("runRowChanges", () => {
+  test("inserts a row using only database defaults", () => {
+    const path = join(dir, "defaults.db");
+    const db = new Database(path, { create: true });
+    db.exec("CREATE TABLE settings (id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1)");
+    db.close();
+    expect(runRowChanges(path, [{ kind: "insert", table: { name: "settings" }, values: {} }]).rowsAffected).toBe(1);
+    expect(runQuery(path, "SELECT id, enabled FROM settings", [], 10).rows).toEqual([{ id: 1, enabled: 1 }]);
+  });
+
   test("applies insert, update, and delete atomically", () => {
     const path = join(dir, "app.db");
     seed(path);

@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { toPgPlaceholders, readPgSchema, runPgQuery, runPgExec } from "./pgServer.ts";
+import { collectPgKeyMetadata, toPgPlaceholders, readPgSchema, runPgQuery, runPgExec } from "./pgServer.ts";
 import { DbError } from "../shared.ts";
 
 describe("toPgPlaceholders", () => {
@@ -30,6 +30,30 @@ describe("toPgPlaceholders", () => {
   test("no placeholders is a no-op", () => {
     expect(toPgPlaceholders("SELECT 1")).toBe("SELECT 1");
   });
+
+  test("preserves PostgreSQL JSON operators and dollar-quoted content", () => {
+    expect(toPgPlaceholders("SELECT payload ? 'key', payload ?| array['a'], payload ?& array['b'] FROM events", 0)).toBe(
+      "SELECT payload ? 'key', payload ?| array['a'], payload ?& array['b'] FROM events",
+    );
+    expect(toPgPlaceholders("SELECT $$ ? $$, $body$ ?| ?& $body$, ?::int", 1)).toBe(
+      "SELECT $$ ? $$, $body$ ?| ?& $body$, $1::int",
+    );
+    expect(toPgPlaceholders("SELECT * FROM events WHERE payload ? 'key' AND id = ?", 1)).toBe(
+      "SELECT * FROM events WHERE payload ? 'key' AND id = $1",
+    );
+    expect(toPgPlaceholders("SELECT * FROM events WHERE id = ? AND payload ? 'key'", 1)).toBe(
+      "SELECT * FROM events WHERE id = $1 AND payload ? 'key'",
+    );
+  });
+});
+
+test("pairs composite foreign-key columns by catalog ordinal", () => {
+  const metadata = collectPgKeyMetadata([
+    { table_schema: "audit", table_name: "events", constraint_name: "events_tenant_actor_fkey", constraint_type: "FOREIGN KEY", column_name: "tenant_id", ref_schema: "core", ref_table: "users", ref_column: "tenant_id" },
+    { table_schema: "audit", table_name: "events", constraint_name: "events_tenant_actor_fkey", constraint_type: "FOREIGN KEY", column_name: "actor_id", ref_schema: "core", ref_table: "users", ref_column: "id" },
+  ]);
+  expect(metadata.foreign.get("audit.events.tenant_id")).toBe("core.users(tenant_id)");
+  expect(metadata.foreign.get("audit.events.actor_id")).toBe("core.users(id)");
 });
 
 // Integration tests require a live Postgres. Set TEST_PG_URL to enable, e.g.

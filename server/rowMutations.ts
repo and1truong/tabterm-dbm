@@ -1,5 +1,6 @@
 import type { DbTableRef, RowChange, RowChangeStatement } from "../shared.ts";
 import { DbError } from "../shared.ts";
+import { decodeDbValue } from "../binaryValues.ts";
 
 const MAX_CHANGES = 500;
 
@@ -24,7 +25,7 @@ function whereSql(change: Extract<RowChange, { kind: "update" | "delete" }>, par
   const key = entries(change.key, "row key");
   const expected = Object.entries(change.expected).filter(([column]) => !(column in change.key));
   return [...key, ...expected].map(([column, value]) => {
-    params.push(value);
+    params.push(decodeDbValue(value));
     // `IS` is SQLite's null-safe equality and Postgres dispatch rewrites this
     // predicate to `IS NOT DISTINCT FROM` before execution.
     return `${quoteIdent(column)} IS ?`;
@@ -35,8 +36,9 @@ export function compileRowChange(change: RowChange): RowChangeStatement {
   const relation = relationSql(change.table);
   const params: unknown[] = [];
   if (change.kind === "insert") {
-    const values = entries(change.values, "insert values");
-    params.push(...values.map(([, value]) => value));
+    const values = Object.entries(change.values);
+    if (!values.length) return { kind: change.kind, sql: `INSERT INTO ${relation} DEFAULT VALUES`, params };
+    params.push(...values.map(([, value]) => decodeDbValue(value)));
     return {
       kind: change.kind,
       sql: `INSERT INTO ${relation} (${values.map(([column]) => quoteIdent(column)).join(", ")}) VALUES (${values.map(() => "?").join(", ")})`,
@@ -45,7 +47,7 @@ export function compileRowChange(change: RowChange): RowChangeStatement {
   }
   if (change.kind === "update") {
     const values = entries(change.values, "updated values");
-    params.push(...values.map(([, value]) => value));
+    params.push(...values.map(([, value]) => decodeDbValue(value)));
     const where = whereSql(change, params);
     return {
       kind: change.kind,

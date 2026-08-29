@@ -31,6 +31,9 @@ describe("structured row mutations", () => {
     expect(compileRowChange({
       kind: "delete", table: { name: "users" }, key: { id: 1 }, expected: { id: 1 },
     }).sql).toBe(`DELETE FROM "users" WHERE "id" IS ?`);
+    expect(compileRowChange({ kind: "insert", table: { name: "users" }, values: {} })).toEqual({
+      kind: "insert", sql: `INSERT INTO "users" DEFAULT VALUES`, params: [],
+    });
   });
 
   test("rejects unsafe unidentifiable or empty batches", () => {
