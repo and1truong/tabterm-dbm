@@ -95,16 +95,14 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   }, [activeTable, pane, host]);
   const closeRouteModal = useCallback(() => {
     if (modalReturnPathRef.current) {
-      modalReturnPathRef.current = null;
+      // Keep the provenance marker: Forward can reopen this same history entry,
+      // and closing it should continue to consume the entry with Back.
       window.history.back();
       return;
     }
     const target = dbRoutePath(activeTable, activeTable ? "structure" : "data");
     host.navigation.navigate(target, { replace: true });
   }, [activeTable, host]);
-  useEffect(() => {
-    if (!route.modal) modalReturnPathRef.current = null;
-  }, [route.modal]);
 
   // discover on cwd change
   const refreshDbs = useCallback(async () => {
@@ -167,16 +165,20 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   } else {
     queryRef.current = null;
   }
+  const rowsContextRef = useRef("");
+  rowsContextRef.current = `${sourceKey ?? ""}\0${activeTable ?? ""}\0${route.table ?? ""}\0${pane}`;
 
   const loadRows = useCallback(async (signal?: AbortSignal) => {
     if (!activeSource || !queryRef.current) return;
+    const requestContext = rowsContextRef.current;
     setErr(null);
     try {
       const q = queryRef.current;
       const r = await dbApi.query(activeSource, q.sql, q.params, q.limit, q.offset, signal);
+      if (rowsContextRef.current !== requestContext) return;
       setResult(r);
     } catch (e) {
-      if (signal?.aborted) return;
+      if (signal?.aborted || rowsContextRef.current !== requestContext) return;
       setResult(null); setErr(String(e));
     }
   }, [sourceKey]);
@@ -237,7 +239,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
       <div className="flex gap-1 px-3 pt-1.5 bg-[var(--bg)] overflow-x-auto shrink-0">
         {(["structure", "data", "sql", "diagram", "insights", "pragmas"] as DbPane[]).map((t) => (
           <button key={t} onClick={() => navigate(activeTable, t)}
-            disabled={(!activeTable && tableRequiredForPane(t)) || (dataDirty && t !== "data")}
+            disabled={dataDirty || (!activeTable && tableRequiredForPane(t))}
             className={"px-3 py-1.5 text-xs font-bold rounded-t-lg " + (pane === t ? "bg-[var(--panel)] text-[var(--text)] border border-[var(--border)] border-b-0" : "text-[var(--muted)]")}>
             {t === "data" ? "Browse Data" : t === "diagram" ? "Relationships" : t[0].toUpperCase() + t.slice(1)}
           </button>
