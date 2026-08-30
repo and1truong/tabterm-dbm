@@ -746,7 +746,7 @@ function ImportCsvModal({ table, onClose, onStage }: {
 
 function ValueInspector({ column, value, onClose }: { column: string; value: unknown; onClose: () => void }) {
   const text = isDbBinaryValue(value)
-    ? `Binary value (${binaryByteLength(value).toLocaleString()} bytes)\n\nBase64:\n${value.__tabtermDbmBinary}`
+    ? `Binary value (${binaryByteLength(value).toLocaleString()} bytes)\n\nBase64:\n${value.__tabtermDbmWire.base64}`
     : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
   const [copied, setCopied] = useState(false);
   return (

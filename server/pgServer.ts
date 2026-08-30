@@ -69,6 +69,7 @@ export function toPgPlaceholders(sql: string, parameterCount = Number.POSITIVE_I
   let out = "";
   let n = 0;
   let quote: '"' | "'" | null = null;
+  let backslashEscapes = false;
   let lineComment = false;
   let blockComment = false;
   let dollarTag: string | null = null;
@@ -92,20 +93,32 @@ export function toPgPlaceholders(sql: string, parameterCount = Number.POSITIVE_I
     }
     if (quote) {
       out += ch;
+      if (backslashEscapes && ch === "\\" && i + 1 < sql.length) {
+        out += sql[++i];
+        continue;
+      }
       if (ch === quote) {
         // A doubled quote is an escaped quote, not a terminator.
-        if (sql[i + 1] === quote) { out += sql[++i]; } else { quote = null; }
+        if (sql[i + 1] === quote) { out += sql[++i]; } else { quote = null; backslashEscapes = false; }
       }
       continue;
     }
     if (ch === "-" && sql[i + 1] === "-") { out += "--"; i++; lineComment = true; continue; }
     if (ch === "/" && sql[i + 1] === "*") { out += "/*"; i++; blockComment = true; continue; }
-    if (ch === '"' || ch === "'") { quote = ch; out += ch; continue; }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      backslashEscapes = ch === "'"
+        && (sql[i - 1] === "E" || sql[i - 1] === "e")
+        && (i < 2 || !/[A-Za-z0-9_$]/.test(sql[i - 2]));
+      out += ch;
+      continue;
+    }
     if (ch === "$") {
       const tag = sql.slice(i).match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/)?.[0];
       if (tag) { out += tag; i += tag.length - 1; dollarTag = tag; continue; }
     }
     if (ch === "?" && n < parameterCount) {
+      if (sql[i - 1] === "@") { out += ch; continue; }
       if (sql[i + 1] === "|" || sql[i + 1] === "&") { out += ch; continue; }
       const before = sql.slice(0, i);
       const previousChar = before.match(/\S(?=\s*$)/)?.[0] ?? "";

@@ -1,11 +1,36 @@
-const BINARY_TAG = "__tabtermDbmBinary";
+const WIRE_TAG = "__tabtermDbmWire";
 
-export interface DbBinaryValue { __tabtermDbmBinary: string }
+export interface DbBinaryValue {
+  __tabtermDbmWire: { kind: "binary"; base64: string };
+}
+
+interface DbEscapedJsonValue {
+  __tabtermDbmWire: { kind: "json"; value: unknown };
+}
+
+function hasWireTag(value: unknown): value is Record<typeof WIRE_TAG, unknown> {
+  return !!value && typeof value === "object"
+    && Object.prototype.hasOwnProperty.call(value, WIRE_TAG);
+}
 
 export function isDbBinaryValue(value: unknown): value is DbBinaryValue {
-  return !!value && typeof value === "object"
+  if (!hasWireTag(value)) return false;
+  const envelope = value[WIRE_TAG];
+  return !!envelope && typeof envelope === "object"
     && Object.keys(value).length === 1
-    && typeof (value as Record<string, unknown>)[BINARY_TAG] === "string";
+    && Object.keys(envelope).length === 2
+    && (envelope as Record<string, unknown>).kind === "binary"
+    && typeof (envelope as Record<string, unknown>).base64 === "string";
+}
+
+function isEscapedJsonValue(value: unknown): value is DbEscapedJsonValue {
+  if (!hasWireTag(value)) return false;
+  const envelope = value[WIRE_TAG];
+  return !!envelope && typeof envelope === "object"
+    && Object.keys(value).length === 1
+    && Object.keys(envelope).length === 2
+    && (envelope as Record<string, unknown>).kind === "json"
+    && Object.prototype.hasOwnProperty.call(envelope, "value");
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -17,17 +42,25 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 export function encodeDbValue(value: unknown): unknown {
-  if (value instanceof Uint8Array) return { [BINARY_TAG]: bytesToBase64(value) };
+  if (value instanceof Uint8Array) {
+    return { [WIRE_TAG]: { kind: "binary", base64: bytesToBase64(value) } };
+  }
+  if (hasWireTag(value)) {
+    return { [WIRE_TAG]: { kind: "json", value } };
+  }
   return value;
 }
 
 export function decodeDbValue(value: unknown): unknown {
-  if (!isDbBinaryValue(value)) return value;
-  const binary = atob(value[BINARY_TAG]);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  if (isDbBinaryValue(value)) {
+    const binary = atob(value[WIRE_TAG].base64);
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  }
+  if (isEscapedJsonValue(value)) return value[WIRE_TAG].value;
+  return value;
 }
 
 export function binaryByteLength(value: DbBinaryValue): number {
-  const base64 = value[BINARY_TAG];
+  const base64 = value[WIRE_TAG].base64;
   return Math.max(0, Math.floor(base64.length * 3 / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0));
 }

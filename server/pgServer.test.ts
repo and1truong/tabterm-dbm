@@ -27,6 +27,12 @@ describe("toPgPlaceholders", () => {
     );
   });
 
+  test("keeps backslash escapes inside PostgreSQL E-strings", () => {
+    expect(toPgPlaceholders("SELECT E'it\\'s ? literal', ?::int", 1)).toBe(
+      "SELECT E'it\\'s ? literal', $1::int",
+    );
+  });
+
   test("no placeholders is a no-op", () => {
     expect(toPgPlaceholders("SELECT 1")).toBe("SELECT 1");
   });
@@ -43,6 +49,9 @@ describe("toPgPlaceholders", () => {
     );
     expect(toPgPlaceholders("SELECT * FROM events WHERE id = ? AND payload ? 'key'", 1)).toBe(
       "SELECT * FROM events WHERE id = $1 AND payload ? 'key'",
+    );
+    expect(toPgPlaceholders("SELECT payload @? '$.key', id = ? FROM events", 1)).toBe(
+      "SELECT payload @? '$.key', id = $1 FROM events",
     );
   });
 });
