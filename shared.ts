@@ -6,7 +6,7 @@ export interface DbFile {
   sizeBytes: number;
 }
 
-export type DbObjectType = "table" | "view";
+export type DbObjectType = "table" | "view" | "materialized_view";
 
 export interface DbColumn {
   name: string;
@@ -14,20 +14,31 @@ export interface DbColumn {
   notNull: boolean;
   pk: boolean;
   fk: string | null;   // "refsTable(refsCol)" or null
+  defaultValue?: string | null;
+  identity?: boolean;
+  generated?: boolean;
+  comparable?: boolean;
 }
 
 export interface DbTable {
   name: string;
+  schema?: string;            // Postgres schema; absent for SQLite
   type: DbObjectType;
   columns: DbColumn[];
+  uniqueKeys?: string[][];     // candidate row identities when no primary key exists
   rowCount: number;    // -1 if unknown
   ddl: string;         // sqlite_master.sql
 }
 
 export interface DbSchema {
   tables: DbTable[];          // tables + views, sqlite_master order
-  indexes: { name: string; sql: string }[];
-  triggers: { name: string; sql: string }[];
+  schemas?: string[];
+  indexes: { name: string; sql: string; schema?: string; table?: string; unique?: boolean; columns?: string[] }[];
+  triggers: { name: string; sql: string; schema?: string; table?: string; timing?: string; event?: string }[];
+  constraints?: { name: string; schema?: string; table: string; type: string; columns: string[]; definition: string }[];
+  sequences?: { name: string; schema?: string; definition?: string }[];
+  routines?: { name: string; schema?: string; type?: string; definition?: string }[];
+  extensions?: { name: string; definition?: string }[];
   pragmas: Record<string, string>; // journal_mode, foreign_keys, encoding, user_version, synchronous
 }
 
@@ -35,6 +46,8 @@ export interface QueryResult {
   columns: string[];
   rows: Record<string, unknown>[];
   ms: number;
+  hasMore: boolean;
+  offset: number;
 }
 
 export interface ExecResult {
@@ -42,20 +55,62 @@ export interface ExecResult {
   ms: number;
 }
 
-// A remembered Postgres connection. Stored in tabterm's own SQLite DB so the
-// picker can re-list it. `url` may contain a plaintext password.
+export interface DbTableRef {
+  name: string;
+  schema?: string;
+}
+
+export type RowChange =
+  | { kind: "insert"; table: DbTableRef; values: Record<string, unknown> }
+  | { kind: "update"; table: DbTableRef; key: Record<string, unknown>; expected: Record<string, unknown>; values: Record<string, unknown> }
+  | { kind: "delete"; table: DbTableRef; key: Record<string, unknown>; expected: Record<string, unknown> };
+
+export interface RowChangeStatement {
+  kind: RowChange["kind"];
+  sql: string;
+  params: unknown[];
+}
+
+export interface RowMutationResult {
+  applied: number;
+  rowsAffected: number;
+  ms: number;
+}
+
+// A remembered Postgres connection. `url` is always credential-redacted;
+// full credential URLs are stored in the OS credential manager.
 export interface PgConnection {
   id: string;
   label: string;
   url: string;
   createdAt: number;
   lastUsedAt: number | null;
+  environment: "local" | "development" | "staging" | "production";
+  readOnly: boolean;
+}
+
+export interface ConnectionTestResult {
+  database: string;
+  user: string;
+  serverVersion: string;
+  ms: number;
+}
+
+export interface DatabaseInsights {
+  metrics: Record<string, string | number>;
+  activity: { id: string; user: string; state: string; durationMs: number; wait: string; query: string }[];
+}
+
+export interface MigrationResult {
+  validated: boolean;
+  applied: boolean;
+  ms: number;
 }
 
 // Thrown by dbServer on bad path / non-read query / SQL error. HTTP layer maps
 // it to a 4xx with { error }.
 export class DbError extends Error {
-  constructor(public code: "not_found" | "not_a_database" | "not_read_only" | "multi_statement" | "sql", message: string) {
+  constructor(public code: "not_found" | "not_a_database" | "not_read_only" | "multi_statement" | "sql" | "cancelled" | "timeout" | "invalid_change" | "conflict", message: string) {
     super(message);
     this.name = "DbError";
   }

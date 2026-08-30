@@ -4,6 +4,7 @@ import Notice from "./Notice.tsx";
 import { dbApi } from "./dbApi.ts";
 import type { DbSource } from "./dbApi.ts";
 import type { QueryResult } from "../shared.ts";
+import { unwrapDbValueForDisplay } from "../binaryValues.ts";
 
 export function DatabaseCreateViewModal({ source, onClose, onCreated }: {
   source: DbSource; onClose: () => void; onCreated: () => void;
@@ -29,7 +30,7 @@ export function DatabaseCreateViewModal({ source, onClose, onCreated }: {
   const create = async () => {
     setBusy(true); setErr(null);
     try {
-      await dbApi.exec(source, ddl);
+      await dbApi.exec(source, ddl, true);
       onCreated();
       onClose();
     } catch (e) { setErr(String(e)); }
@@ -79,7 +80,10 @@ export function DatabaseCreateViewModal({ source, onClose, onCreated }: {
                   <thead><tr>{preview.columns.map((c) => <th key={c} className="text-left mono font-semibold px-1.5 py-0.5 border-b border-[var(--border)]">{c}</th>)}</tr></thead>
                   <tbody>
                     {preview.rows.map((row, i) => (
-                      <tr key={i}>{preview.columns.map((c) => <td key={c} className="mono px-1.5 py-0.5 border-b border-[var(--border)]">{String((row as Record<string, unknown>)[c] ?? "")}</td>)}</tr>
+                      <tr key={i}>{preview.columns.map((c) => {
+                        const value = unwrapDbValueForDisplay((row as Record<string, unknown>)[c]);
+                        return <td key={c} className="mono px-1.5 py-0.5 border-b border-[var(--border)]">{value && typeof value === "object" ? JSON.stringify(value) : String(value ?? "")}</td>;
+                      })}</tr>
                     ))}
                   </tbody>
                 </table>

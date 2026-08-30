@@ -5,7 +5,7 @@ TABTERM ?= ../tabterm
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install typecheck test check build vendor clean
+.PHONY: help install typecheck test ui-smoke check build vendor clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -20,7 +20,10 @@ typecheck: ## Type-check the module against the host contract
 test: ## Run the dbm server (sqlite/pg) + filter tests
 	$(BUN) test
 
-check: typecheck test ## Type-check then test (the full local gate)
+ui-smoke: ## Exercise client interactions in a real happy-dom
+	$(BUN) run test:ui
+
+check: build typecheck test ui-smoke ## Build, type-check, then run unit + UI smoke tests
 
 build: ## Build self-contained dist/modules/dbm/{client.js,server.js}
 	$(BUN) scripts/build-modules.ts

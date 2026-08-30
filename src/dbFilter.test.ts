@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { compileGroup, previewWhere, groupHasActive, newRule, defaultOp, MAX_DEPTH, type FilterModel } from "./dbFilter.ts";
+import { compileGroup, previewWhere, groupHasActive, newRule, defaultOp, opsFor, MAX_DEPTH, type FilterModel } from "./dbFilter.ts";
 import type { DbColumn } from "../shared.ts";
 
 const cols: DbColumn[] = [
@@ -55,6 +55,26 @@ describe("compileGroup", () => {
     const m: FilterModel = { id: "g", combinator: "AND" as const, rules: [{ ...newRule(cols), col: 1, op: "contains", value: "" }] };
     expect(compileGroup(m, cols).where).toBe("");
     expect(groupHasActive(m)).toBe(false);
+  });
+
+  test("uses the PostgreSQL regex operator for PostgreSQL filters", () => {
+    const m: FilterModel = { id: "g", combinator: "AND", rules: [{ ...newRule(cols), col: 1, op: "regex", value: "^A" }] };
+    expect(compileGroup(m, cols, "postgres")).toEqual({ where: '("name" ~ ?)', params: ["^A"] });
+    expect(previewWhere(m, cols, "postgres")).toBe(`("name" ~ '^A')`);
+  });
+
+  test("offers SQLite glob patterns instead of unsupported regex", () => {
+    expect(opsFor("TEXT", "sqlite").map((op) => op.v)).toContain("glob");
+    expect(opsFor("TEXT", "sqlite").map((op) => op.v)).not.toContain("regex");
+    const m: FilterModel = { id: "g", combinator: "AND", rules: [{ ...newRule(cols), col: 1, op: "glob", value: "A*" }] };
+    expect(compileGroup(m, cols, "sqlite")).toEqual({ where: '("name" GLOB ?)', params: ["A*"] });
+  });
+
+  test("safely compiles a stale dialect-specific rule during source switches", () => {
+    const regex: FilterModel = { id: "g", combinator: "AND", rules: [{ ...newRule(cols), col: 1, op: "regex", value: "A*" }] };
+    const glob: FilterModel = { id: "g", combinator: "AND", rules: [{ ...newRule(cols), col: 1, op: "glob", value: "^A" }] };
+    expect(compileGroup(regex, cols, "sqlite").where).toBe('("name" GLOB ?)');
+    expect(compileGroup(glob, cols, "postgres").where).toBe('("name" ~ ?)');
   });
 });
 

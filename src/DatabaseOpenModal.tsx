@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Database as DbIcon, X, Plug, Trash2 } from "lucide-react";
 import Notice from "./Notice.tsx";
-import type { DbFile, PgConnection } from "../shared.ts";
+import type { ConnectionTestResult, DbFile, PgConnection } from "../shared.ts";
 import { dbApi } from "./dbApi.ts";
 import type { DbSource } from "./dbApi.ts";
 
@@ -11,9 +11,12 @@ export function DatabaseOpenModal({ cwd, discovered, onClose, onOpen, create }: 
   const [path, setPath] = useState("");
   const [pgUrl, setPgUrl] = useState("");
   const [pgLabel, setPgLabel] = useState("");
+  const [environment, setEnvironment] = useState<PgConnection["environment"]>("development");
+  const [readOnly, setReadOnly] = useState(true);
   const [saved, setSaved] = useState<PgConnection[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
 
   // Saved Postgres connections are irrelevant to the "create database" flow.
   useEffect(() => {
@@ -26,15 +29,35 @@ export function DatabaseOpenModal({ cwd, discovered, onClose, onOpen, create }: 
     if (!url) return;
     setBusy(true); setErr(null);
     try {
-      const c = await dbApi.connections.save(pgLabel.trim() || url, url);
-      onOpen({ kind: "postgres", connId: c.id, label: c.label, url: c.url });
+      setTestResult(await dbApi.connections.test(url));
+      const c = await dbApi.connections.save(pgLabel.trim() || url, url, environment, readOnly);
+      onOpen({ kind: "postgres", connId: c.id, label: c.label, url: c.url, environment: c.environment, readOnly: c.readOnly });
     } catch (e) { setErr(String(e)); }
     finally { setBusy(false); }
   };
-  const openSaved = (c: PgConnection) => onOpen({ kind: "postgres", connId: c.id, label: c.label, url: c.url });
+  const testConnection = async () => {
+    const url = pgUrl.trim();
+    if (!url) return;
+    setBusy(true); setErr(null); setTestResult(null);
+    try { setTestResult(await dbApi.connections.test(url)); }
+    catch (e) { setErr(String(e)); }
+    finally { setBusy(false); }
+  };
+  const openSaved = (c: PgConnection) => onOpen({ kind: "postgres", connId: c.id, label: c.label, url: c.url, environment: c.environment, readOnly: c.readOnly });
   const deleteSaved = async (id: string) => {
     try { await dbApi.connections.delete(id); setSaved((s) => s.filter((c) => c.id !== id)); }
     catch (e) { setErr(String(e)); }
+  };
+  const openSqlite = async () => {
+    const target = path.trim();
+    if (!target) return;
+    if (!create) { onOpen({ kind: "sqlite", path: target }); return; }
+    setBusy(true); setErr(null);
+    try {
+      const created = await dbApi.create(target);
+      onOpen({ kind: "sqlite", path: created.path });
+    } catch (error) { setErr(String(error)); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -74,18 +97,47 @@ export function DatabaseOpenModal({ cwd, discovered, onClose, onOpen, create }: 
                 placeholder="Label (optional)"
                 className="w-full rounded-lg border border-[var(--border-2)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
               />
+              <div className="grid grid-cols-2 gap-2">
+                <label className="grid gap-1 text-[11px] text-[var(--muted)]">
+                  Environment
+                  <select aria-label="Connection environment" value={environment}
+                    onChange={(event) => setEnvironment(event.target.value as PgConnection["environment"])}
+                    className="rounded-lg border border-[var(--border-2)] bg-[var(--bg)] px-2 py-1.5 text-sm text-[var(--text)]">
+                    <option value="local">Local</option>
+                    <option value="development">Development</option>
+                    <option value="staging">Staging</option>
+                    <option value="production">Production</option>
+                  </select>
+                </label>
+                <label className="flex items-end gap-2 px-2 py-1.5 text-xs text-[var(--muted)]">
+                  <input type="checkbox" checked={!readOnly} onChange={(event) => setReadOnly(!event.target.checked)} />
+                  Allow writes
+                </label>
+              </div>
+              {environment === "production" && !readOnly && (
+                <Notice variant="warning" layout="inline" className="text-xs px-2 py-1">Production writes are enabled for this profile.</Notice>
+              )}
               <div className="flex gap-2">
                 <input
-                  value={pgUrl} onChange={(e) => setPgUrl(e.target.value)} spellCheck={false}
+                  value={pgUrl} onChange={(e) => { setPgUrl(e.target.value); setTestResult(null); }} spellCheck={false}
                   onKeyDown={(e) => { if (e.key === "Enter") void connect(); }}
                   placeholder="postgres://user:pass@host:5432/db"
                   className="flex-1 mono rounded-lg border border-[var(--border-2)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
+                <button onClick={() => void testConnection()} disabled={busy || !pgUrl.trim()}
+                  className="px-3 rounded-lg text-sm font-semibold border border-[var(--border-2)] text-[var(--muted)] disabled:opacity-40">
+                  Test
+                </button>
                 <button onClick={connect} disabled={busy || !pgUrl.trim()}
                   className="flex items-center gap-1.5 px-3 rounded-lg text-sm font-bold bg-[var(--accent)] text-[var(--panel)] disabled:opacity-40">
                   <Plug size={14} /> Connect
                 </button>
               </div>
+              {testResult && (
+                <Notice variant="success" layout="inline" className="text-xs px-2 py-1">
+                  Connected to {testResult.database} as {testResult.user} · PostgreSQL {testResult.serverVersion} · {testResult.ms}ms
+                </Notice>
+              )}
 
               {saved.length > 0 && (
                 <>
@@ -96,6 +148,8 @@ export function DatabaseOpenModal({ cwd, discovered, onClose, onOpen, create }: 
                         <button onClick={() => openSaved(c)} className="flex items-center gap-2 text-left flex-1 min-w-0">
                           <DbIcon size={14} className="text-[var(--accent-soft)]" />
                           <span className="text-xs text-[var(--text)] truncate">{c.label}</span>
+                          <span className={"text-[9px] uppercase font-bold px-1 rounded " + (c.environment === "production" ? "text-[var(--red)]" : "text-[var(--faint)]")}>{c.environment}</span>
+                          {c.readOnly && <span className="text-[9px] uppercase text-[var(--faint)]">RO</span>}
                           <span className="mono text-[11px] text-[var(--faint)] truncate">{c.url}</span>
                         </button>
                         <button onClick={() => void deleteSaved(c.id)} title="Forget connection"
@@ -114,9 +168,9 @@ export function DatabaseOpenModal({ cwd, discovered, onClose, onOpen, create }: 
         </div>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-[var(--border)]">
           <button onClick={onClose} className="px-3 py-1.5 rounded-lg text-sm font-semibold text-[var(--muted)] border border-[var(--border-2)] hover:bg-[var(--hover)]">Cancel</button>
-          <button onClick={() => path.trim() && onOpen({ kind: "sqlite", path: path.trim() })}
-            className="px-4 py-1.5 rounded-lg text-sm font-bold bg-[var(--accent)] text-[var(--panel)]">
-            {create ? "Create" : "Open"}
+          <button onClick={() => void openSqlite()} disabled={busy || !path.trim()}
+            className="px-4 py-1.5 rounded-lg text-sm font-bold bg-[var(--accent)] text-[var(--panel)] disabled:opacity-40">
+            {busy && create ? "Creating…" : create ? "Create" : "Open"}
           </button>
         </div>
       </div>

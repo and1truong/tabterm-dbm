@@ -1,8 +1,8 @@
 # tabterm-dbm
 
 The **database** module for [tabterm](https://github.com/and1truong/tabterm), extracted
-into its own repository — browse SQLite files or connect to Postgres: object tree, filter
-builder, SQL tab, Create View (`id: dbm`). A tabterm *module*, not a standalone app: it has
+into its own repository — manage SQLite and PostgreSQL with catalog search, safe data editing,
+SQL consoles, import/export, query plans, transactional migrations, relationships, and insights (`id: dbm`). A tabterm *module*, not a standalone app: it has
 no server/SPA of its own; it activates inside a tabterm host through the
 `@tabterm/module-host` contract.
 
@@ -12,7 +12,7 @@ no server/SPA of its own; it activates inside a tabterm host through the
   Use `bun` for everything. Do **not** use `npm`, `yarn`, or `pnpm`. Lockfile is `bun.lock`.
 - **Typecheck:** `bun run typecheck` (`tsc --noEmit`) — or `make typecheck`.
 - **Test:** `bun test` (sqlite/pg server + filter tests) — or `make test`.
-- **Full local gate:** `make check` (typecheck + test).
+- **Full local gate:** `make check` (build + typecheck + unit tests + happy-dom UI smokes).
 - **Build:** `make build` → `dist/modules/dbm/{client.js,server.js}`.
 - `make help` lists every target.
 
@@ -22,21 +22,20 @@ The module talks to the host **only** through `@tabterm/module-host` plus its ow
 no deep imports into a host's `src/`. It owns everything it needs:
 
 - `shared.ts` — HTTP JSON shapes shared by the module's server endpoints and client
-  (`DbFile`, `DbSchema`, `DbTable`, `QueryResult`, `ExecResult`, `PgConnection`, `DbError`).
+  (`DbFile`, `DbSchema`, `DbTable`, `QueryResult`, `PgConnection`, `DatabaseInsights`, `DbError`).
 - `server.ts` — server entry: `activate(host)` runs the migration (its own
-  `pg_connections` table), then registers the `/discover`, `/schema`, `/query`, `/exec`,
-  and `/connections` routes under `/api/modules/dbm/r`.
-  - `server/dbServer.ts` — SQLite discovery/schema/query/exec + `assertReadOnly`.
-  - `server/pgServer.ts` — Postgres half via Bun's built-in client (`Bun.SQL`); no `pg`
-    dependency. Rewrites `?` placeholders to `$n` for Postgres.
-  - `server/connections.ts` — saved Postgres-connection CRUD backed by `host.db`.
+  `pg_connections` table), then registers its routes under `/api/modules/dbm/r`.
+  - `server/dbServer.ts` — SQLite discovery/catalog/query/explain/mutation/insights.
+  - `server/pgServer.ts` — PostgreSQL catalog/query/explain/mutation/insights via Bun's built-in
+    client (`Bun.SQL`); no `pg` dependency. Rewrites `?` placeholders to `$n`.
+  - `server/connections.ts` — profile metadata in `host.db`; credentials in `Bun.secrets`.
   - `server/routeHandlers.ts` — dispatches each HTTP route to the sqlite/pg core.
-  - `server/migrations.ts` — v1 creates `pg_connections`.
+  - `server/migrations.ts` — owns versioned `pg_connections` migrations.
 - `src/index.tsx` — client entry: `activate(host)` registers one rail page (`id: dbm`,
   Database icon) rendering `WorkspaceDatabaseView`.
   - `src/WorkspaceDatabaseView.tsx` — the main view; `src/dbApi.ts` is the typed HTTP
-    client; `src/dbFilter.ts` builds WHERE clauses; the `Database*Modal`/`Notice` files are
-    the open/create-view/filter UI.
+    client; `src/dbFilter.ts` builds WHERE clauses; `src/SqlWorkspace.tsx` owns SQL consoles;
+    data transfer and relationship helpers remain pure and unit-tested.
 
 See `README.md`.
 
