@@ -58,7 +58,10 @@ export function parseDbRoute(path: readonly string[], knownTables?: readonly str
 export function dbRoutePath(table: string | null, pane: DbPane, modal: DbModal | null = null): string[] {
   if (modal) return pane === "data" ? [ACTION_SEGMENT, modal] : [ACTION_SEGMENT, modal, modalPaneToSegment[pane]];
   const section = paneToSegment[pane];
-  if (!table) return section && pane !== "data" ? [section] : [];
+  if (!table) {
+    if (pane === "structure") return ["structure"];
+    return section && pane !== "data" ? [section] : [];
+  }
   return section ? [table, section] : [table];
 }
 

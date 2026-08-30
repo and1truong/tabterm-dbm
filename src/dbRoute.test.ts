@@ -22,6 +22,8 @@ describe("database module routes", () => {
   test("keeps database-wide panes reachable without a table", () => {
     expect(parseDbRoute(["query"], [])).toEqual({ table: null, pane: "sql", modal: null });
     expect(parseDbRoute(["pragmas"], [])).toEqual({ table: null, pane: "pragmas", modal: null });
+    expect(dbRoutePath(null, "structure")).toEqual(["structure"]);
+    expect(parseDbRoute(["structure"], [])).toEqual({ table: null, pane: "structure", modal: null });
     expect(dbRoutePath(null, "sql")).toEqual(["query"]);
     expect(dbRoutePath(null, "diagram")).toEqual(["relationships"]);
     expect(tableRequiredForPane("structure")).toBeTrue();
