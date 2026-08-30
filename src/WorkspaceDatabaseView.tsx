@@ -100,9 +100,9 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
       window.history.back();
       return;
     }
-    const target = dbRoutePath(activeTable, route.pane);
+    const target = dbRoutePath(activeTable ?? route.table, route.pane);
     host.navigation.navigate(target, { replace: true });
-  }, [activeTable, route.pane, host]);
+  }, [activeTable, route.table, route.pane, host]);
 
   // discover on cwd change
   const refreshDbs = useCallback(async () => {
