@@ -82,7 +82,7 @@ pgDescribe("pgServer (live)", () => {
 
   test("exec rejects nothing / read+schema round-trip", async () => {
     await runPgExec(url, `DROP TABLE IF EXISTS ${T}`);
-    await runPgExec(url, `CREATE TABLE ${T} (id serial PRIMARY KEY, email text NOT NULL, age int)`);
+    await runPgExec(url, `CREATE TABLE ${T} (id serial PRIMARY KEY, email text NOT NULL, age int, document xml)`);
     const ins = await runPgExec(url, `INSERT INTO ${T} (email, age) VALUES ('a@x', 21), ('b@x', 9)`);
     expect(ins.rowsAffected).toBe(2);
 
@@ -90,9 +90,11 @@ pgDescribe("pgServer (live)", () => {
     const tbl = schema.tables.find((t) => t.name === T);
     expect(tbl).toBeTruthy();
     expect(tbl!.schema).toBe("public");
-    expect(tbl!.columns.map((c) => c.name)).toEqual(["id", "email", "age"]);
+    expect(tbl!.columns.map((c) => c.name)).toEqual(["id", "email", "age", "document"]);
     expect(tbl!.columns.find((c) => c.name === "id")!.pk).toBe(true);
     expect(tbl!.columns.find((c) => c.name === "email")!.notNull).toBe(true);
+    expect(tbl!.columns.find((c) => c.name === "email")!.comparable).toBe(true);
+    expect(tbl!.columns.find((c) => c.name === "document")!.comparable).toBe(false);
     expect(schema.pragmas.database).toBeTruthy();
 
     await runPgExec(url, `DROP TABLE ${T}`);

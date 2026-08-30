@@ -9,8 +9,9 @@ for (const key of [
 (globalThis as any).window = win;
 let clipboard = "";
 Object.defineProperty((globalThis as any).navigator, "clipboard", { value: { writeText: async (value: string) => { clipboard = value; } }, configurable: true });
+let loadInsights = async (_url: string) => Response.json({ metrics: { engine: "SQLite", file_bytes: 4096, integrity: "ok" }, activity: [] });
 (globalThis as any).fetch = async (input: string | URL | Request) => {
-  if (String(input).includes("/insights?")) return Response.json({ metrics: { engine: "SQLite", file_bytes: 4096, integrity: "ok" }, activity: [] });
+  if (String(input).includes("/insights?")) return loadInsights(String(input));
   return Response.json({ error: "unexpected smoke request" }, { status: 500 });
 };
 
@@ -80,8 +81,28 @@ async function exercise(width: number) {
   if (!insightsContainer.textContent?.includes("Operational insights") || !insightsContainer.textContent?.includes("4.0 KB") || !insightsContainer.textContent?.includes("No other active")) {
     fail(`${width}px: operational insights did not render`);
   }
+
+  let resolveOld!: (response: Response) => void;
+  let resolveNew!: (response: Response) => void;
+  loadInsights = (url) => new Promise((resolve) => {
+    if (url.includes("old.sqlite")) resolveOld = resolve;
+    else resolveNew = resolve;
+  });
+  flushSync(() => insightsRoot.render(React.createElement(InsightsPane, { source: { kind: "sqlite", path: "/tmp/old.sqlite" } })));
+  await settle();
+  if (insightsContainer.textContent?.includes("4.0 KB")) fail(`${width}px: old insights remain visible during a source switch`);
+  flushSync(() => insightsRoot.render(React.createElement(InsightsPane, { source: { kind: "sqlite", path: "/tmp/new.sqlite" } })));
+  await settle();
+  resolveNew(Response.json({ metrics: { source: "new-source" }, activity: [] }));
+  await settle(); await settle();
+  resolveOld(Response.json({ metrics: { source: "old-source" }, activity: [] }));
+  await settle(); await settle();
+  if (!insightsContainer.textContent?.includes("new-source") || insightsContainer.textContent?.includes("old-source")) {
+    fail(`${width}px: stale insights replaced the active source response`);
+  }
   flushSync(() => insightsRoot.unmount());
   insightsContainer.remove();
+  loadInsights = async () => Response.json({ metrics: { engine: "SQLite", file_bytes: 4096, integrity: "ok" }, activity: [] });
 }
 
 await exercise(1280);

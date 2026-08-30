@@ -17,6 +17,7 @@ export interface DbColumn {
   defaultValue?: string | null;
   identity?: boolean;
   generated?: boolean;
+  comparable?: boolean;
 }
 
 export interface DbTable {

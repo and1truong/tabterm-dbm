@@ -243,6 +243,17 @@ describe("runMigration", () => {
 });
 
 describe("runRowChanges", () => {
+  test("preserves exact 64-bit integer strings", () => {
+    const path = join(dir, "exact-integer.db");
+    const db = new Database(path, { create: true });
+    db.exec("CREATE TABLE measurements (value INTEGER)");
+    db.close();
+    runRowChanges(path, [{ kind: "insert", table: { name: "measurements" }, values: { value: "9007199254740993" } }]);
+    expect(runQuery(path, "SELECT CAST(value AS TEXT) AS value FROM measurements", [], 10).rows).toEqual([
+      { value: "9007199254740993" },
+    ]);
+  });
+
   test("inserts a row using only database defaults", () => {
     const path = join(dir, "defaults.db");
     const db = new Database(path, { create: true });

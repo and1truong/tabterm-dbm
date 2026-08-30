@@ -186,6 +186,35 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
       `CREATE VIEW "${String(row.table_schema).replace(/"/g, '""')}"."${String(row.table_name).replace(/"/g, '""')}" AS\n${String(row.definition ?? "")}`,
     ]));
 
+    const comparableRows = await db.unsafe(
+      `SELECT n.nspname AS table_schema, rel.relname AS table_name, a.attname AS column_name,
+              EXISTS (
+                SELECT 1
+                  FROM pg_operator o
+                 WHERE o.oprname = '=' AND o.oprkind = 'b' AND o.oprresult = 'boolean'::regtype
+                   AND (o.oprleft = COALESCE(NULLIF(t.typbasetype, 0), t.oid) OR EXISTS (
+                     SELECT 1 FROM pg_cast c
+                      WHERE c.castsource = COALESCE(NULLIF(t.typbasetype, 0), t.oid)
+                        AND c.casttarget = o.oprleft AND c.castcontext = 'i'
+                   ))
+                   AND (o.oprright = COALESCE(NULLIF(t.typbasetype, 0), t.oid) OR EXISTS (
+                     SELECT 1 FROM pg_cast c
+                      WHERE c.castsource = COALESCE(NULLIF(t.typbasetype, 0), t.oid)
+                        AND c.casttarget = o.oprright AND c.castcontext = 'i'
+                   ))
+              ) AS is_comparable
+         FROM pg_class rel
+         JOIN pg_namespace n ON n.oid = rel.relnamespace
+         JOIN pg_attribute a ON a.attrelid = rel.oid AND a.attnum > 0 AND NOT a.attisdropped
+         JOIN pg_type t ON t.oid = a.atttypid
+        WHERE rel.relkind IN ('r','p','v','m','f')
+          AND n.nspname NOT IN ('pg_catalog','information_schema')`,
+    ) as Record<string, unknown>[];
+    const comparable = new Map(comparableRows.map((row) => [
+      `${row.table_schema}.${row.table_name}.${row.column_name}`,
+      row.is_comparable === true,
+    ]));
+
     // Primary keys and foreign-key targets, keyed by table+column.
     const keys = await db.unsafe(
       `SELECT n.nspname AS table_schema, rel.relname AS table_name, con.conname AS constraint_name,
@@ -254,6 +283,7 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
         defaultValue: c.column_default == null ? null : String(c.column_default),
         identity: c.is_identity === "YES",
         generated: c.is_generated != null && c.is_generated !== "NEVER",
+        comparable: comparable.get(keyId) ?? false,
       };
       tbl.columns.push(col);
     }

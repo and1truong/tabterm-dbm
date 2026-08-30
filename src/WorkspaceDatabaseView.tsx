@@ -73,6 +73,8 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   const sourceKey = activeSource
     ? activeSource.kind === "sqlite" ? `sqlite:${activeSource.path}` : `postgres:${activeSource.connId}`
     : null;
+  const sourceKeyRef = useRef(sourceKey);
+  sourceKeyRef.current = sourceKey;
 
   // load schema when a db is chosen
   useEffect(() => {
@@ -136,7 +138,10 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   // Re-fetch schema after a write (create view, SQL-tab exec) so the tree updates.
   const reloadSchema = useCallback(() => {
     if (!activeSource) return;
-    dbApi.schema(activeSource).then(setSchema).catch((e) => setErr(String(e)));
+    const requestKey = sourceKey;
+    dbApi.schema(activeSource)
+      .then((next) => { if (sourceKeyRef.current === requestKey) setSchema(next); })
+      .catch((e) => { if (sourceKeyRef.current === requestKey) setErr(String(e)); });
   }, [sourceKey]);
 
   const loadAllRows = useCallback(async () => {
@@ -451,7 +456,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const canInsert = writable && table.type === "table";
   const canEditRows = canInsert && identityColumns.length > 0;
   const nonComparableColumns = source.kind === "postgres"
-    ? new Set(table.columns.filter((column) => column.type.toLowerCase() === "json").map((column) => column.name))
+    ? new Set(table.columns.filter((column) => column.comparable === false).map((column) => column.name))
     : undefined;
   const changes = buildRowChanges(table, rows, edits, deleted, inserts, nonComparableColumns);
   const dirty = changes.length > 0;
@@ -926,13 +931,25 @@ export function InsightsPane({ source }: { source: DbSource }) {
   const [insights, setInsights] = useState<DatabaseInsights | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const load = async () => {
+  const requestRef = useRef(0);
+  const sourceKey = source.kind === "sqlite" ? `sqlite:${source.path}` : `postgres:${source.connId}`;
+  const load = useCallback(async () => {
+    const request = ++requestRef.current;
     setBusy(true); setError(null);
-    try { setInsights(await dbApi.insights(source)); }
-    catch (loadError) { setError(String(loadError)); }
-    finally { setBusy(false); }
-  };
-  useEffect(() => { void load(); }, [source.kind === "sqlite" ? source.path : source.connId]);
+    try {
+      const next = await dbApi.insights(source);
+      if (request === requestRef.current) setInsights(next);
+    } catch (loadError) {
+      if (request === requestRef.current) setError(String(loadError));
+    } finally {
+      if (request === requestRef.current) setBusy(false);
+    }
+  }, [sourceKey]);
+  useEffect(() => {
+    setInsights(null); setError(null);
+    void load();
+    return () => { requestRef.current++; };
+  }, [load]);
   const formatMetric = (key: string, value: string | number) => {
     if (key.endsWith("_bytes") && typeof value === "number") {
       const units = ["B", "KB", "MB", "GB", "TB"];

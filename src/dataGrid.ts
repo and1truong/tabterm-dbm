@@ -49,9 +49,15 @@ export function rowsToCsv(columns: string[], rows: Record<string, unknown>[]): s
 }
 
 export function coerceCellValue(raw: string, type: string): unknown {
-  if (raw.trim().toUpperCase() === "NULL") return null;
-  if (/\b(INT|INTEGER|BIGINT|SMALLINT|REAL|FLOAT|DOUBLE|DECIMAL|NUMERIC|SERIAL)\b/i.test(type) && raw.trim() !== "") {
-    const number = Number(raw);
+  const value = raw.trim();
+  if (value.toUpperCase() === "NULL") return null;
+  if (/\b(DECIMAL|NUMERIC)\b/i.test(type) && value !== "") return value;
+  if (/\b(INT|INTEGER|BIGINT|SMALLINT|INT8|SERIAL|BIGSERIAL)\b/i.test(type) && /^[-+]?\d+$/.test(value)) {
+    const number = Number(value);
+    return Number.isSafeInteger(number) ? number : value;
+  }
+  if (/\b(REAL|FLOAT|DOUBLE)\b/i.test(type) && value !== "") {
+    const number = Number(value);
     return Number.isFinite(number) ? number : raw;
   }
   if (/\b(BOOL|BOOLEAN)\b/i.test(type)) {
