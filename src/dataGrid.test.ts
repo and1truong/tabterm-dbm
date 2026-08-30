@@ -76,4 +76,24 @@ describe("staged row changes", () => {
       { kind: "update", table: { name: "accounts" }, key: { email: "ada@example.com" }, expected: row, values: { name: "Augusta" } },
     ]);
   });
+
+  test("omits non-comparable PostgreSQL columns from optimistic predicates", () => {
+    const jsonTable: DbTable = {
+      name: "events", schema: "public", type: "table", rowCount: -1, ddl: "",
+      columns: [
+        { name: "id", type: "integer", notNull: true, pk: true, fk: null },
+        { name: "name", type: "text", notNull: true, pk: false, fk: null },
+        { name: "payload", type: "json", notNull: true, pk: false, fk: null },
+      ],
+    };
+    const row = { id: 1, name: "before", payload: { ok: true } };
+    expect(buildRowChanges(jsonTable, [row], { [editKey(0, "name")]: "after" }, new Set(), [], new Set(["payload"]))[0]).toEqual({
+      kind: "update", table: { schema: "public", name: "events" }, key: { id: 1 },
+      expected: { id: 1, name: "before" }, values: { name: "after" },
+    });
+    expect(buildRowChanges(jsonTable, [row], {}, new Set([0]), [], new Set(["payload"]))[0]).toEqual({
+      kind: "delete", table: { schema: "public", name: "events" }, key: { id: 1 },
+      expected: { id: 1, name: "before" },
+    });
+  });
 });

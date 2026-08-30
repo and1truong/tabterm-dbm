@@ -13,6 +13,12 @@ describe("SQL read-only safety", () => {
     expect(assertReadOnlySql("SELECT $tag$ DROP TABLE x; $tag$ AS body")).toContain("SELECT");
   });
 
+  test("ignores nested PostgreSQL block-comment content", () => {
+    const sql = "SELECT /* outer /* DELETE; */ UPDATE; still outer */ 1";
+    expect(sqlTokens(sql)).toEqual(["SELECT"]);
+    expect(assertReadOnlySql(sql)).toBe(sql);
+  });
+
   test("rejects write operations nested under WITH and EXPLAIN", () => {
     expect(() => assertReadOnlySql("WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x"))
       .toThrow(DbError);

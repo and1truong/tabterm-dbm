@@ -56,6 +56,12 @@ describe("compileGroup", () => {
     expect(compileGroup(m, cols).where).toBe("");
     expect(groupHasActive(m)).toBe(false);
   });
+
+  test("uses the PostgreSQL regex operator for PostgreSQL filters", () => {
+    const m: FilterModel = { id: "g", combinator: "AND", rules: [{ ...newRule(cols), col: 1, op: "regex", value: "^A" }] };
+    expect(compileGroup(m, cols, "postgres")).toEqual({ where: '("name" ~ ?)', params: ["^A"] });
+    expect(previewWhere(m, cols, "postgres")).toBe(`("name" ~ '^A')`);
+  });
 });
 
 describe("previewWhere", () => {

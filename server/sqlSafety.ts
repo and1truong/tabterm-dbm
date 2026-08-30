@@ -27,8 +27,13 @@ export function sqlTokens(sql: string): string[] {
       continue;
     }
     if (ch === "/" && sql[i + 1] === "*") {
-      const end = sql.indexOf("*/", i + 2);
-      i = end === -1 ? sql.length : end + 2;
+      let depth = 1;
+      i += 2;
+      while (i < sql.length && depth) {
+        if (sql[i] === "/" && sql[i + 1] === "*") { depth++; i += 2; }
+        else if (sql[i] === "*" && sql[i + 1] === "/") { depth--; i += 2; }
+        else i++;
+      }
       continue;
     }
     if (ch === "'" || ch === '"' || ch === "`") {

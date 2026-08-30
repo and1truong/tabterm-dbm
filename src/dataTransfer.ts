@@ -1,6 +1,6 @@
 import type { DbTable } from "../shared.ts";
 import { tableSql } from "./sqlIdentifiers.ts";
-import { unwrapDbValueForDisplay } from "../binaryValues.ts";
+import { decodeDbValue, isDbBinaryValue, unwrapDbValueForDisplay } from "../binaryValues.ts";
 
 export type ExportFormat = "csv" | "json" | "sql" | "markdown";
 
@@ -10,7 +10,13 @@ function csvCell(value: unknown): string {
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-function sqlValue(value: unknown): string {
+function sqlValue(value: unknown, postgres: boolean): string {
+  if (isDbBinaryValue(value)) {
+    const bytes = decodeDbValue(value) as Uint8Array;
+    const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase();
+    return postgres ? `decode('${hex}', 'hex')` : `X'${hex}'`;
+  }
+  value = unwrapDbValueForDisplay(value);
   if (value == null) return "NULL";
   if (typeof value === "number") return Number.isFinite(value) ? String(value) : "NULL";
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
@@ -31,7 +37,7 @@ export function serializeRows(format: ExportFormat, columns: string[], rows: Rec
   if (format === "sql") {
     if (!table) throw new Error("SQL export requires a table");
     const names = columns.map((column) => `"${column.replace(/"/g, '""')}"`).join(", ");
-    return displayRows.map((row) => `INSERT INTO ${tableSql(table)} (${names}) VALUES (${columns.map((column) => sqlValue(row[column])).join(", ")});`).join("\n") + "\n";
+    return rows.map((row) => `INSERT INTO ${tableSql(table)} (${names}) VALUES (${columns.map((column) => sqlValue(row[column], !!table.schema)).join(", ")});`).join("\n") + "\n";
   }
   return [columns.map(csvCell).join(","), ...displayRows.map((row) => columns.map((column) => csvCell(row[column])).join(","))].join("\n");
 }

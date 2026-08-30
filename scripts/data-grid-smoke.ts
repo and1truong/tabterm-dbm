@@ -61,7 +61,11 @@ async function exercise(width: number) {
     columns: ["id", "name"],
     result: {
       columns: ["id", "name"],
-      rows: [{ id: 1, name: "Ada" }, { id: 2, name: "G".repeat(200) }],
+      rows: [
+        { id: 1, name: "Ada" },
+        { id: 2, name: "G".repeat(200) },
+        { id: 3, name: { __tabtermDbmWire: { kind: "binary", base64: "AA==" } } },
+      ],
       ms: 1.2,
       hasMore: true,
       offset: 0,
@@ -106,7 +110,7 @@ async function exercise(width: number) {
   if (!events.includes("sort:name:true")) fail(`${width}px: shift-sort interaction did not fire`);
   if (!events.includes("next")) fail(`${width}px: next-page interaction did not fire`);
   if (!events.includes("size:50")) fail(`${width}px: page-size interaction did not fire`);
-  if (!container.textContent?.includes("1–2+")) fail(`${width}px: result range is missing`);
+  if (!container.textContent?.includes("1–3+")) fail(`${width}px: result range is missing`);
 
   const columnsButton = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Columns 2/2");
   columnsButton?.click();
@@ -118,6 +122,12 @@ async function exercise(width: number) {
   await settle();
   if (!container.querySelector('[role="dialog"][aria-label="Large value inspector"]')) fail(`${width}px: large-value inspector is missing`);
   byLabel("Close large value")?.click();
+
+  const binaryCell = [...container.querySelectorAll("td")].find((cell) => cell.textContent?.trim() === "<binary 1 bytes>");
+  if (!binaryCell) fail(`${width}px: binary cell is missing`);
+  binaryCell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  if (byLabel("Edit row 3 name")) fail(`${width}px: binary cell incorrectly opened the text editor`);
 
   const addRow = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Add row");
   addRow?.click();

@@ -92,7 +92,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   const activeTbl: DbTable | undefined = schema?.tables.find((t) => tableKey(t) === activeTable);
   const queryRef = useRef<{ sql: string; params: unknown[]; limit: number; offset: number } | null>(null);
   if (activeSource && activeTable && activeTbl) {
-    const { where, params } = compileGroup(filterModel, activeTbl.columns);
+    const { where, params } = compileGroup(filterModel, activeTbl.columns, activeSource.kind);
     const base = `SELECT * FROM ${tableSql(activeTbl)}`;
     const sql = (where ? `${base} WHERE ${where}` : base) + orderBySql(sorts);
     queryRef.current = { sql, params, limit: pageSize, offset: page * pageSize };
@@ -176,7 +176,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
         <ObjectTree schema={schema} activeTable={activeTable} onSelect={setActiveTable} locked={dataDirty} />
         <div className="flex flex-col min-w-0">
           {err && <Notice variant="error" layout="inline" className="px-3 py-2 text-xs">{err}</Notice>}
-          {pane === "data" && activeTbl && (
+          {pane === "data" && activeTbl && activeSource && (
             <>
               {filterOpen && !dataDirty && (
                 <>
@@ -185,12 +185,12 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
                   <div className="px-3 py-1 border-b border-[var(--border)] bg-[var(--bg)]">
                     <span className="mono text-[11px] text-[var(--muted)]">
                       <b className="text-[var(--accent)]">WHERE</b>{" "}
-                      {previewWhere(filterModel, activeTbl.columns) || <i className="text-[var(--faint)]">no filter</i>}
+                      {previewWhere(filterModel, activeTbl.columns, activeSource.kind) || <i className="text-[var(--faint)]">no filter</i>}
                     </span>
                   </div>
                 </>
               )}
-              <DataGrid table={activeTbl} source={activeSource!} writable={writable}
+              <DataGrid table={activeTbl} source={activeSource} writable={writable}
                 columns={activeTbl.columns.map((c) => c.name)} result={result}
                 sorts={sorts} pageSize={pageSize}
                 onSort={(column, additive) => { setSorts((current) => toggleSort(current, column, additive)); setPage(0); }}
@@ -446,7 +446,10 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const identityColumns = primaryColumns.length ? primaryColumns : fallbackKey.map((name) => table.columns.find((column) => column.name === name)!);
   const canInsert = writable && table.type === "table";
   const canEditRows = canInsert && identityColumns.length > 0;
-  const changes = buildRowChanges(table, rows, edits, deleted, inserts);
+  const nonComparableColumns = source.kind === "postgres"
+    ? new Set(table.columns.filter((column) => column.type.toLowerCase() === "json").map((column) => column.name))
+    : undefined;
+  const changes = buildRowChanges(table, rows, edits, deleted, inserts, nonComparableColumns);
   const dirty = changes.length > 0;
   useEffect(() => {
     onDirtyChange(dirty);
@@ -577,9 +580,10 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                   const isNull = value === null || value === undefined;
                   const isNum = typeof value === "number";
                   const column = table.columns.find((candidate) => candidate.name === c);
+                  const canEditCell = canEditRows && !isDbBinaryValue(v);
                   return (
-                    <td key={c} onDoubleClick={() => canEditRows && !deleted.has(i) && setEditing(stagedKey)}
-                      className={"px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)] align-top " + (isNum ? "text-right " : "") + (stagedKey in edits ? "bg-[var(--accent)]/10 " : "") + (canEditRows ? "cursor-text" : "")}>
+                    <td key={c} onDoubleClick={() => canEditCell && !deleted.has(i) && setEditing(stagedKey)}
+                      className={"px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)] align-top " + (isNum ? "text-right " : "") + (stagedKey in edits ? "bg-[var(--accent)]/10 " : "") + (canEditCell ? "cursor-text" : "")}>
                       {editing === stagedKey ? (
                         <input autoFocus aria-label={`Edit row ${result.offset + i + 1} ${c}`}
                           defaultValue={isNull ? "NULL" : String(value)}

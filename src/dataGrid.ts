@@ -71,6 +71,7 @@ export function buildRowChanges(
   edits: Record<string, unknown>,
   deleted: Set<number>,
   inserts: Record<string, unknown>[],
+  nonComparableColumns: ReadonlySet<string> = new Set(),
 ): RowChange[] {
   const primary = table.columns.filter((column) => column.pk).map((column) => column.name);
   const identity = primary.length ? primary : (table.uniqueKeys?.find((key) => key.length && key.every((name) => table.columns.some((column) => column.name === name && column.notNull))) ?? []);
@@ -78,8 +79,11 @@ export function buildRowChanges(
   const changes: RowChange[] = [];
   rows.forEach((row, rowIndex) => {
     const key = Object.fromEntries(identity.map((column) => [column, row[column]]));
+    const expected = nonComparableColumns.size
+      ? Object.fromEntries(Object.entries(row).filter(([column]) => !nonComparableColumns.has(column)))
+      : row;
     if (deleted.has(rowIndex)) {
-      if (identity.length) changes.push({ kind: "delete", table: tableRef, key, expected: row });
+      if (identity.length) changes.push({ kind: "delete", table: tableRef, key, expected });
       return;
     }
     const values: Record<string, unknown> = {};
@@ -88,7 +92,7 @@ export function buildRowChanges(
       if (stagedKey in edits) values[column.name] = edits[stagedKey];
     }
     if (identity.length && Object.keys(values).length) {
-      changes.push({ kind: "update", table: tableRef, key, expected: row, values });
+      changes.push({ kind: "update", table: tableRef, key, expected, values });
     }
   });
   for (const values of inserts) changes.push({ kind: "insert", table: tableRef, values });

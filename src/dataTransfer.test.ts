@@ -30,3 +30,10 @@ test("exports stored JSON instead of its collision-escape envelope", () => {
   expect(JSON.parse(serializeRows("json", ["payload"], rows))).toEqual([{ payload: value }]);
   expect(serializeRows("sql", ["payload"], rows, table)).toContain(JSON.stringify(value));
 });
+
+test("exports reversible binary literals for SQLite and PostgreSQL", () => {
+  const rows = [{ payload: encodeDbValue(new Uint8Array([0, 127, 255])) }];
+  const sqliteTable: DbTable = { ...table, schema: undefined };
+  expect(serializeRows("sql", ["payload"], rows, sqliteTable)).toContain("X'007FFF'");
+  expect(serializeRows("sql", ["payload"], rows, table)).toContain("decode('007FFF', 'hex')");
+});
