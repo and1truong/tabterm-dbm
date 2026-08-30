@@ -8,6 +8,7 @@ import { dbApi } from "./dbApi.ts";
 import type { DbSource } from "./dbApi.ts";
 import { isWriteSql, sqlToRun } from "./sqlConsole.ts";
 import Notice from "./Notice.tsx";
+import { binaryByteLength, isDbBinaryValue, unwrapDbValueForDisplay } from "../binaryValues.ts";
 
 interface ConsoleTab { id: string; name: string; sql: string }
 interface HistoryEntry { id: string; sql: string; ranAt: number; ms: number; ok: boolean }
@@ -239,11 +240,16 @@ function SqlOutputs({ outputs, active, onActive }: { outputs: StatementOutput[];
 }
 
 function ResultTable({ result }: { result: QueryResult }) {
+  const cellText = (value: unknown) => {
+    if (isDbBinaryValue(value)) return `<binary ${binaryByteLength(value).toLocaleString()} bytes>`;
+    const displayValue = unwrapDbValueForDisplay(value);
+    return typeof displayValue === "object" ? JSON.stringify(displayValue) : String(displayValue);
+  };
   return (
     <div className="flex-1 overflow-auto">
       <table className="w-full text-xs border-collapse">
         <thead className="sticky top-0 bg-[var(--panel)]"><tr>{result.columns.map((column) => <th key={column} className="text-left mono px-2 py-1 border-b border-[var(--border)]">{column}</th>)}</tr></thead>
-        <tbody>{result.rows.map((row, index) => <tr key={index}>{result.columns.map((column) => <td key={column} className="mono px-2 py-1 border-b border-[var(--border)]">{row[column] == null ? <i className="text-[var(--faint)]">NULL</i> : String(row[column])}</td>)}</tr>)}</tbody>
+        <tbody>{result.rows.map((row, index) => <tr key={index}>{result.columns.map((column) => <td key={column} className="mono px-2 py-1 border-b border-[var(--border)]">{row[column] == null ? <i className="text-[var(--faint)]">NULL</i> : cellText(row[column])}</td>)}</tr>)}</tbody>
       </table>
       <div className="px-3 py-1 mono text-[10px] text-[var(--faint)]">{result.rows.length}{result.hasMore ? "+" : ""} rows · {result.ms}ms</div>
     </div>

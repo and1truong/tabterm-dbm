@@ -18,7 +18,7 @@ import { parseCsv, serializeRows } from "./dataTransfer.ts";
 import type { ExportFormat } from "./dataTransfer.ts";
 import { schemaRelations, schemaToMermaid } from "./schemaDiagram.ts";
 import { DatabaseMigrationModal } from "./DatabaseMigrationModal.tsx";
-import { binaryByteLength, isDbBinaryValue } from "../binaryValues.ts";
+import { binaryByteLength, isDbBinaryValue, unwrapDbValueForDisplay } from "../binaryValues.ts";
 
 // Short label for the database chip in the header.
 function sourceChip(src: DbSource | null): string {
@@ -29,6 +29,7 @@ function sourceChip(src: DbSource | null): string {
 
 function displayDbValue(value: unknown): string {
   if (isDbBinaryValue(value)) return `<binary ${binaryByteLength(value).toLocaleString()} bytes>`;
+  value = unwrapDbValueForDisplay(value);
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
@@ -747,7 +748,10 @@ function ImportCsvModal({ table, onClose, onStage }: {
 function ValueInspector({ column, value, onClose }: { column: string; value: unknown; onClose: () => void }) {
   const text = isDbBinaryValue(value)
     ? `Binary value (${binaryByteLength(value).toLocaleString()} bytes)\n\nBase64:\n${value.__tabtermDbmWire.base64}`
-    : typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
+    : (() => {
+      const displayValue = unwrapDbValueForDisplay(value);
+      return typeof displayValue === "object" ? JSON.stringify(displayValue, null, 2) : String(displayValue);
+    })();
   const [copied, setCopied] = useState(false);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>

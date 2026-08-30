@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildRowChanges, coerceCellValue, editKey, orderBySql, rowsToCsv, toggleSort } from "./dataGrid.ts";
 import type { DbTable } from "../shared.ts";
+import { encodeDbValue } from "../binaryValues.ts";
 
 describe("data-grid query helpers", () => {
   test("cycles a primary sort through asc, desc, and off", () => {
@@ -22,6 +23,13 @@ describe("data-grid query helpers", () => {
     expect(rowsToCsv(["name", "note", "meta"], [{
       name: "Ada, Inc.", note: `said "hi"\nnext`, meta: { ok: true },
     }])).toBe(`name,note,meta\n"Ada, Inc.","said ""hi""\nnext","{""ok"":true}"`);
+  });
+
+  test("unwraps escaped JSON values when copying CSV", () => {
+    const value = { __tabtermDbmWire: { kind: "binary", base64: "AA==" } };
+    expect(rowsToCsv(["payload"], [{ payload: encodeDbValue(value) }])).toBe(
+      'payload\n"{""__tabtermDbmWire"":{""kind"":""binary"",""base64"":""AA==""}}"',
+    );
   });
 });
 

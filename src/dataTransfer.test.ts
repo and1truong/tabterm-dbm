@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { parseCsv, serializeRows } from "./dataTransfer.ts";
 import type { DbTable } from "../shared.ts";
+import { encodeDbValue } from "../binaryValues.ts";
 
 const table: DbTable = { name: "users", schema: "public", type: "table", columns: [], rowCount: -1, ddl: "" };
 
@@ -21,4 +22,11 @@ test("parses quoted CSV including commas, escaped quotes, and newlines", () => {
     ],
   });
   expect(() => parseCsv("id,id\n1,2")).toThrow();
+});
+
+test("exports stored JSON instead of its collision-escape envelope", () => {
+  const value = { __tabtermDbmWire: { kind: "binary", base64: "AA==" } };
+  const rows = [{ payload: encodeDbValue(value) }];
+  expect(JSON.parse(serializeRows("json", ["payload"], rows))).toEqual([{ payload: value }]);
+  expect(serializeRows("sql", ["payload"], rows, table)).toContain(JSON.stringify(value));
 });

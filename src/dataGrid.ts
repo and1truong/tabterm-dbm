@@ -1,5 +1,6 @@
 import { quoteIdent } from "./sqlIdentifiers.ts";
 import type { DbTable, RowChange } from "../shared.ts";
+import { unwrapDbValueForDisplay } from "../binaryValues.ts";
 
 export type SortDirection = "asc" | "desc";
 export interface SortSpec { column: string; direction: SortDirection }
@@ -27,6 +28,7 @@ export function orderBySql(sorts: SortSpec[]): string {
 }
 
 function cellText(value: unknown): string {
+  value = unwrapDbValueForDisplay(value);
   if (value === null || value === undefined) return "";
   if (typeof value === "object") {
     try { return JSON.stringify(value); } catch { return String(value); }

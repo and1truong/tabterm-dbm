@@ -33,6 +33,10 @@ function isEscapedJsonValue(value: unknown): value is DbEscapedJsonValue {
     && Object.prototype.hasOwnProperty.call(envelope, "value");
 }
 
+export function unwrapDbValueForDisplay(value: unknown): unknown {
+  return isEscapedJsonValue(value) ? value[WIRE_TAG].value : value;
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += 0x8000) {

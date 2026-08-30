@@ -33,6 +33,12 @@ describe("toPgPlaceholders", () => {
     );
   });
 
+  test("tracks nested PostgreSQL block comments", () => {
+    expect(toPgPlaceholders("SELECT /* outer /* inner */ ? still outer */ ?::int", 1)).toBe(
+      "SELECT /* outer /* inner */ ? still outer */ $1::int",
+    );
+  });
+
   test("no placeholders is a no-op", () => {
     expect(toPgPlaceholders("SELECT 1")).toBe("SELECT 1");
   });

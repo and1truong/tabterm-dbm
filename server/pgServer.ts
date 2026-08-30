@@ -71,7 +71,7 @@ export function toPgPlaceholders(sql: string, parameterCount = Number.POSITIVE_I
   let quote: '"' | "'" | null = null;
   let backslashEscapes = false;
   let lineComment = false;
-  let blockComment = false;
+  let blockCommentDepth = 0;
   let dollarTag: string | null = null;
   const placeholderPrefixes = new Set([
     "AND", "AS", "BETWEEN", "BY", "CASE", "ELSE", "HAVING", "ILIKE", "IN", "IS",
@@ -81,9 +81,10 @@ export function toPgPlaceholders(sql: string, parameterCount = Number.POSITIVE_I
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
     if (lineComment) { out += ch; if (ch === "\n") lineComment = false; continue; }
-    if (blockComment) {
+    if (blockCommentDepth) {
       out += ch;
-      if (ch === "*" && sql[i + 1] === "/") { out += sql[++i]; blockComment = false; }
+      if (ch === "/" && sql[i + 1] === "*") { out += sql[++i]; blockCommentDepth++; }
+      else if (ch === "*" && sql[i + 1] === "/") { out += sql[++i]; blockCommentDepth--; }
       continue;
     }
     if (dollarTag) {
@@ -104,7 +105,7 @@ export function toPgPlaceholders(sql: string, parameterCount = Number.POSITIVE_I
       continue;
     }
     if (ch === "-" && sql[i + 1] === "-") { out += "--"; i++; lineComment = true; continue; }
-    if (ch === "/" && sql[i + 1] === "*") { out += "/*"; i++; blockComment = true; continue; }
+    if (ch === "/" && sql[i + 1] === "*") { out += "/*"; i++; blockCommentDepth = 1; continue; }
     if (ch === '"' || ch === "'") {
       quote = ch;
       backslashEscapes = ch === "'"

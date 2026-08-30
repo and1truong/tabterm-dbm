@@ -1,5 +1,6 @@
 import type { DbTable } from "../shared.ts";
 import { tableSql } from "./sqlIdentifiers.ts";
+import { unwrapDbValueForDisplay } from "../binaryValues.ts";
 
 export type ExportFormat = "csv" | "json" | "sql" | "markdown";
 
@@ -18,18 +19,21 @@ function sqlValue(value: unknown): string {
 }
 
 export function serializeRows(format: ExportFormat, columns: string[], rows: Record<string, unknown>[], table?: DbTable): string {
-  if (format === "json") return JSON.stringify(rows, null, 2) + "\n";
+  const displayRows = rows.map((row) => Object.fromEntries(
+    Object.entries(row).map(([column, value]) => [column, unwrapDbValueForDisplay(value)]),
+  ));
+  if (format === "json") return JSON.stringify(displayRows, null, 2) + "\n";
   if (format === "markdown") {
     const cell = (value: unknown) => String(value ?? "NULL").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
     return `| ${columns.map(cell).join(" | ")} |\n| ${columns.map(() => "---").join(" | ")} |\n`
-      + rows.map((row) => `| ${columns.map((column) => cell(row[column])).join(" | ")} |`).join("\n") + "\n";
+      + displayRows.map((row) => `| ${columns.map((column) => cell(row[column])).join(" | ")} |`).join("\n") + "\n";
   }
   if (format === "sql") {
     if (!table) throw new Error("SQL export requires a table");
     const names = columns.map((column) => `"${column.replace(/"/g, '""')}"`).join(", ");
-    return rows.map((row) => `INSERT INTO ${tableSql(table)} (${names}) VALUES (${columns.map((column) => sqlValue(row[column])).join(", ")});`).join("\n") + "\n";
+    return displayRows.map((row) => `INSERT INTO ${tableSql(table)} (${names}) VALUES (${columns.map((column) => sqlValue(row[column])).join(", ")});`).join("\n") + "\n";
   }
-  return [columns.map(csvCell).join(","), ...rows.map((row) => columns.map((column) => csvCell(row[column])).join(","))].join("\n");
+  return [columns.map(csvCell).join(","), ...displayRows.map((row) => columns.map((column) => csvCell(row[column])).join(","))].join("\n");
 }
 
 export function parseCsv(text: string): { columns: string[]; rows: Record<string, string>[] } {

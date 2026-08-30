@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { binaryByteLength, decodeDbValue, encodeDbValue, isDbBinaryValue } from "./binaryValues.ts";
+import { binaryByteLength, decodeDbValue, encodeDbValue, isDbBinaryValue, unwrapDbValueForDisplay } from "./binaryValues.ts";
 
 test("round-trips binary database values through a tagged JSON-safe representation", () => {
   const encoded = encodeDbValue(new Uint8Array([0, 1, 127, 128, 255]));
@@ -18,5 +18,11 @@ test("does not reinterpret ordinary JSON objects as binary", () => {
     const encoded = encodeDbValue(value);
     expect(isDbBinaryValue(encoded)).toBe(false);
     expect(decodeDbValue(encoded)).toBe(value);
+    expect(unwrapDbValueForDisplay(encoded)).toBe(value);
   }
+});
+
+test("retains binary envelopes when unwrapping display values", () => {
+  const encoded = encodeDbValue(new Uint8Array([0]));
+  expect(unwrapDbValueForDisplay(encoded)).toBe(encoded);
 });
