@@ -25,7 +25,7 @@ Database pages are deep-linkable under `/<workspace>/dbm/<table>`: the table-onl
 opens Structure, while `/data`, `/query`, `/insight`, `/pragmas`, and `/relationships`
 open the corresponding page. Database-wide Create View and Migration Studio use
 `/<workspace>/dbm/actions/new-view` and `/<workspace>/dbm/actions/migration` (with the
-originating pane appended when needed). Browser back/forward restores the selected page.
+originating pane/table context appended when needed). Browser back/forward restores the selected page.
 
 ## Layout
 

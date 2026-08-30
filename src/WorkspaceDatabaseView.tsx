@@ -91,7 +91,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   }, [host]);
   const openRouteModal = useCallback((modal: DbModal) => {
     modalReturnPathRef.current = dbRoutePath(activeTable, pane);
-    host.navigation.navigate(dbRoutePath(null, pane, modal));
+    host.navigation.navigate(dbRoutePath(activeTable, pane, modal));
   }, [activeTable, pane, host]);
   const closeRouteModal = useCallback(() => {
     if (modalReturnPathRef.current) {
@@ -145,7 +145,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
     const selected = requested ?? retained ?? (schema.tables[0] ? tableKey(schema.tables[0]) : null);
     setActiveTable(selected);
     const canonical = route.modal
-      ? dbRoutePath(null, route.pane, route.modal)
+      ? dbRoutePath(requested, route.pane, route.modal)
       : dbRoutePath(selected, route.pane);
     if (!sameRoutePath(routePath, canonical)) host.navigation.navigate(canonical, { replace: true });
   }, [schema, activeTable, route.table, route.pane, route.modal, routePath, host]);

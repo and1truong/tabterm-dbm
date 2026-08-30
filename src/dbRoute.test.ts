@@ -34,8 +34,10 @@ describe("database module routes", () => {
   test("gives database-wide actions an unambiguous namespace and preserves their pane", () => {
     expect(parseDbRoute(["actions", "new-view"])).toEqual({ table: null, pane: "data", modal: "new-view" });
     expect(parseDbRoute(["actions", "migration", "query"])).toEqual({ table: null, pane: "sql", modal: "migration" });
+    expect(parseDbRoute(["actions", "migration", "data", "orders"])).toEqual({ table: "orders", pane: "data", modal: "migration" });
     expect(dbRoutePath(null, "data", "new-view")).toEqual(["actions", "new-view"]);
     expect(dbRoutePath(null, "sql", "migration")).toEqual(["actions", "migration", "query"]);
+    expect(dbRoutePath("orders", "data", "migration")).toEqual(["actions", "migration", "data", "orders"]);
     expect(dbRoutePath(null, "structure", "migration")).toEqual(["actions", "migration", "structure"]);
   });
 

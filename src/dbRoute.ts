@@ -42,7 +42,7 @@ export function parseDbRoute(path: readonly string[], knownTables?: readonly str
   const section = path[1];
   if (table === ACTION_SEGMENT && (section === "new-view" || section === "migration")) {
     const modalPane = path[2] ? (segmentToPane[path[2]] ?? "data") : "data";
-    return { table: null, pane: modalPane, modal: section };
+    return { table: path[3] ?? null, pane: modalPane, modal: section };
   }
 
   // A one-segment pane route keeps database-wide tools reachable when a schema
@@ -56,7 +56,10 @@ export function parseDbRoute(path: readonly string[], knownTables?: readonly str
 }
 
 export function dbRoutePath(table: string | null, pane: DbPane, modal: DbModal | null = null): string[] {
-  if (modal) return pane === "data" ? [ACTION_SEGMENT, modal] : [ACTION_SEGMENT, modal, modalPaneToSegment[pane]];
+  if (modal) {
+    const base = pane === "data" && !table ? [ACTION_SEGMENT, modal] : [ACTION_SEGMENT, modal, modalPaneToSegment[pane]];
+    return table ? [...base, table] : base;
+  }
   const section = paneToSegment[pane];
   if (!table) {
     if (pane === "structure") return ["structure"];
