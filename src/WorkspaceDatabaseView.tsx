@@ -100,9 +100,9 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
       window.history.back();
       return;
     }
-    const target = dbRoutePath(activeTable, activeTable ? "structure" : "data");
+    const target = dbRoutePath(activeTable, route.pane);
     host.navigation.navigate(target, { replace: true });
-  }, [activeTable, host]);
+  }, [activeTable, route.pane, host]);
 
   // discover on cwd change
   const refreshDbs = useCallback(async () => {
@@ -389,7 +389,7 @@ export function ObjectTree({ schema, activeTable, onSelect, locked }: {
         {items.map((t) => {
           const key = tableKey(t);
           return (
-          <button key={key} onClick={() => onSelect(key)} disabled={locked && key !== activeTable} title={t.ddl?.slice(0, 120)}
+          <button key={key} onClick={() => onSelect(key)} disabled={locked} title={t.ddl?.slice(0, 120)}
             className={"w-full flex items-center gap-2 px-3 py-1 text-left text-xs " + (key === activeTable ? "bg-[var(--accent)]/15 text-[var(--accent)]" : "text-[var(--text)] hover:bg-[var(--hover)]")}>
             <span className="text-[var(--muted)]">{icon}</span>
             <span className="truncate flex-1">{tableLabel(t)}</span>
