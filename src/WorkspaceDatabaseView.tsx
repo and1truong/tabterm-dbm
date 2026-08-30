@@ -180,7 +180,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
             <>
               {filterOpen && !dataDirty && (
                 <>
-                  <DatabaseFilterBuilder model={filterModel} cols={activeTbl.columns}
+                  <DatabaseFilterBuilder model={filterModel} cols={activeTbl.columns} dialect={activeSource.kind}
                     onChange={(next) => { setFilterModel(next); setPage(0); }} />
                   <div className="px-3 py-1 border-b border-[var(--border)] bg-[var(--bg)]">
                     <span className="mono text-[11px] text-[var(--muted)]">
@@ -580,7 +580,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                   const isNull = value === null || value === undefined;
                   const isNum = typeof value === "number";
                   const column = table.columns.find((candidate) => candidate.name === c);
-                  const canEditCell = canEditRows && !isDbBinaryValue(v);
+                  const canEditCell = canEditRows && (v == null || typeof v !== "object");
                   return (
                     <td key={c} onDoubleClick={() => canEditCell && !deleted.has(i) && setEditing(stagedKey)}
                       className={"px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)] align-top " + (isNum ? "text-right " : "") + (stagedKey in edits ? "bg-[var(--accent)]/10 " : "") + (canEditCell ? "cursor-text" : "")}>

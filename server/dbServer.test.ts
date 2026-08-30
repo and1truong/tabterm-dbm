@@ -90,6 +90,17 @@ describe("readSchema", () => {
   test("throws not_found for a missing file", () => {
     expect(() => readSchema(join(dir, "ghost.db"))).toThrow(DbError);
   });
+
+  test("reports SQLite generated columns from table_xinfo", () => {
+    const path = join(dir, "generated.db");
+    const db = new Database(path, { create: true });
+    db.exec("CREATE TABLE totals (base INTEGER, doubled INTEGER GENERATED ALWAYS AS (base * 2) STORED)");
+    db.close();
+    expect(readSchema(path).tables[0].columns).toEqual([
+      expect.objectContaining({ name: "base", generated: false }),
+      expect.objectContaining({ name: "doubled", generated: true }),
+    ]);
+  });
 });
 
 describe("readInsights", () => {
@@ -142,6 +153,12 @@ describe("runQuery", () => {
     seed(join(dir, "app.db"));
     const result = runQuery(join(dir, "app.db"), "PRAGMA table_info(users)", [], 100);
     expect(result.rows.some((row) => row.name === "email")).toBe(true);
+  });
+
+  test("accepts a trailing terminator before a line comment", () => {
+    seed(join(dir, "app.db"));
+    expect(runQuery(join(dir, "app.db"), "SELECT 1 AS value; -- done", [], 10).rows)
+      .toEqual([{ value: 1 }]);
   });
 
   test("round-trips BLOB values through optimistic update predicates", () => {

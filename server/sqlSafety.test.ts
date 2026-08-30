@@ -30,11 +30,12 @@ describe("SQL read-only safety", () => {
     expect(() => assertReadOnlySql("SELECT 1; SELECT 2"))
       .toThrow(DbError);
     expect(assertReadOnlySql("SELECT 1;")).toBe("SELECT 1");
+    expect(assertReadOnlySql("SELECT 1; -- done")).toBe("SELECT 1 -- done");
   });
 
   test("wraps row-producing reads with one look-ahead row", () => {
     expect(boundReadSql("SELECT * FROM t", 50, 100)).toBe(
-      `SELECT * FROM (SELECT * FROM t) AS "__tabterm_query" LIMIT 51 OFFSET 100`,
+      `SELECT * FROM (SELECT * FROM t\n) AS "__tabterm_query" LIMIT 51 OFFSET 100`,
     );
   });
 

@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { compileGroup, previewWhere, groupHasActive, newRule, defaultOp, MAX_DEPTH, type FilterModel } from "./dbFilter.ts";
+import { compileGroup, previewWhere, groupHasActive, newRule, defaultOp, opsFor, MAX_DEPTH, type FilterModel } from "./dbFilter.ts";
 import type { DbColumn } from "../shared.ts";
 
 const cols: DbColumn[] = [
@@ -61,6 +61,13 @@ describe("compileGroup", () => {
     const m: FilterModel = { id: "g", combinator: "AND", rules: [{ ...newRule(cols), col: 1, op: "regex", value: "^A" }] };
     expect(compileGroup(m, cols, "postgres")).toEqual({ where: '("name" ~ ?)', params: ["^A"] });
     expect(previewWhere(m, cols, "postgres")).toBe(`("name" ~ '^A')`);
+  });
+
+  test("offers SQLite glob patterns instead of unsupported regex", () => {
+    expect(opsFor("TEXT", "sqlite").map((op) => op.v)).toContain("glob");
+    expect(opsFor("TEXT", "sqlite").map((op) => op.v)).not.toContain("regex");
+    const m: FilterModel = { id: "g", combinator: "AND", rules: [{ ...newRule(cols), col: 1, op: "glob", value: "A*" }] };
+    expect(compileGroup(m, cols, "sqlite")).toEqual({ where: '("name" GLOB ?)', params: ["A*"] });
   });
 });
 

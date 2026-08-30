@@ -15,8 +15,10 @@ const WRITE_TOKENS = new Set([
 
 // Tokenize only the SQL structure needed for safety checks. Quoted values,
 // identifiers, and comments are deliberately excluded from the token stream.
-export function sqlTokens(sql: string): string[] {
-  const tokens: string[] = [];
+interface SqlToken { value: string; start: number; end: number }
+
+function scanSqlTokens(sql: string): SqlToken[] {
+  const tokens: SqlToken[] = [];
   let i = 0;
   while (i < sql.length) {
     const ch = sql[i];
@@ -66,18 +68,23 @@ export function sqlTokens(sql: string): string[] {
     if (/[A-Za-z_]/.test(ch)) {
       const start = i++;
       while (i < sql.length && /[A-Za-z0-9_$]/.test(sql[i])) i++;
-      tokens.push(sql.slice(start, i).toUpperCase());
+      tokens.push({ value: sql.slice(start, i).toUpperCase(), start, end: i });
       continue;
     }
-    if (ch === ";") tokens.push(";");
+    if (ch === ";") tokens.push({ value: ";", start: i, end: i + 1 });
     i++;
   }
   return tokens;
 }
 
+export function sqlTokens(sql: string): string[] {
+  return scanSqlTokens(sql).map((token) => token.value);
+}
+
 export function normalizeSingleStatement(sql: string): string {
   const trimmed = sql.trim();
-  const tokens = sqlTokens(trimmed);
+  const scanned = scanSqlTokens(trimmed);
+  const tokens = scanned.map((token) => token.value);
   const semicolons = tokens.reduce<number[]>((out, token, i) => {
     if (token === ";") out.push(i);
     return out;
@@ -87,7 +94,10 @@ export function normalizeSingleStatement(sql: string): string {
     throw new DbError("multi_statement", "only a single statement is allowed");
   }
   if (!content.length) throw new DbError("not_read_only", "statement is empty");
-  return trimmed.replace(/;+\s*$/, "");
+  const terminator = semicolons.length ? scanned[semicolons[0]] : null;
+  return terminator
+    ? trimmed.slice(0, terminator.start) + trimmed.slice(terminator.end)
+    : trimmed;
 }
 
 export function assertReadOnlySql(sql: string): string {
@@ -110,5 +120,5 @@ export function boundReadSql(sql: string, limit: number, offset = 0): string {
   const normalized = assertReadOnlySql(sql);
   const verb = sqlTokens(normalized)[0];
   if (verb === "EXPLAIN" || verb === "PRAGMA") return normalized;
-  return `SELECT * FROM (${normalized}) AS "__tabterm_query" LIMIT ${limit + 1} OFFSET ${offset}`;
+  return `SELECT * FROM (${normalized}\n) AS "__tabterm_query" LIMIT ${limit + 1} OFFSET ${offset}`;
 }

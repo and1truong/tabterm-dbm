@@ -6,7 +6,7 @@ export const MAX_DEPTH = 12;
 export type FilterCombinator = "AND" | "OR";
 export type DbDialect = "sqlite" | "postgres";
 
-export type TextOp = "contains" | "not_contains" | "regex" | "equals" | "not_equals" | "is_null" | "not_null";
+export type TextOp = "contains" | "not_contains" | "regex" | "glob" | "equals" | "not_equals" | "is_null" | "not_null";
 export type NumOp = "equals" | "not_equals" | "lt" | "gt" | "lte" | "gte" | "is_null" | "not_null";
 export type FilterOp = TextOp | NumOp;
 
@@ -32,6 +32,9 @@ export const TEXT_OPS: { v: TextOp; l: string }[] = [
   { v: "is_null", l: "is null" },
   { v: "not_null", l: "not null" },
 ];
+const SQLITE_TEXT_OPS: { v: TextOp; l: string }[] = TEXT_OPS.map((op) =>
+  op.v === "regex" ? { v: "glob", l: "glob pattern" } : op,
+);
 export const NUM_OPS: { v: NumOp; l: string }[] = [
   { v: "equals", l: "= equals" },
   { v: "not_equals", l: "≠ not equals" },
@@ -56,7 +59,9 @@ export function isNumericType(t: string): boolean {
   const u = t.toUpperCase();
   return u.includes("INT") || u.includes("REAL") || u.includes("FLOA") || u.includes("NUM") || u.includes("DOUBLE");
 }
-export function opsFor(type: string) { return isNumericType(type) ? NUM_OPS : TEXT_OPS; }
+export function opsFor(type: string, dialect: DbDialect = "sqlite") {
+  return isNumericType(type) ? NUM_OPS : dialect === "postgres" ? TEXT_OPS : SQLITE_TEXT_OPS;
+}
 export function defaultOp(type: string): FilterOp { return isNumericType(type) ? "equals" : "contains"; }
 export const opNeedsValue = (op: FilterOp) => op !== "is_null" && op !== "not_null";
 
@@ -84,7 +89,14 @@ function compileRuleExec(r: FilterRule, cols: DbColumn[], params: unknown[], dia
   switch (r.op) {
     case "contains": params.push(`%${r.value}%`); return `${name} LIKE ?`;
     case "not_contains": params.push(`%${r.value}%`); return `${name} NOT LIKE ?`;
-    case "regex": params.push(r.value); return `${name} ${dialect === "postgres" ? "~" : "REGEXP"} ?`;
+    case "regex": {
+      if (dialect !== "postgres") throw new Error("regex filters require PostgreSQL");
+      params.push(r.value); return `${name} ~ ?`;
+    }
+    case "glob": {
+      if (dialect !== "sqlite") throw new Error("glob filters require SQLite");
+      params.push(r.value); return `${name} GLOB ?`;
+    }
     case "equals": { if (numeric) { const n = numOrThrow(r.value); params.push(n); return `${name} = ?`; } params.push(r.value); return `${name} = ?`; }
     case "not_equals": { if (numeric) { params.push(numOrThrow(r.value)); return `${name} <> ?`; } params.push(r.value); return `${name} <> ?`; }
     case "lt": params.push(numOrThrow(r.value)); return `${name} < ?`;
@@ -123,7 +135,14 @@ function compileRulePreview(r: FilterRule, cols: DbColumn[], dialect: DbDialect)
   switch (r.op) {
     case "contains": return `${name} LIKE '%${r.value.replace(/'/g, "''")}%'`;
     case "not_contains": return `${name} NOT LIKE '%${r.value.replace(/'/g, "''")}%'`;
-    case "regex": return `${name} ${dialect === "postgres" ? "~" : "REGEXP"} '${r.value.replace(/'/g, "''")}'`;
+    case "regex": {
+      if (dialect !== "postgres") throw new Error("regex filters require PostgreSQL");
+      return `${name} ~ '${r.value.replace(/'/g, "''")}'`;
+    }
+    case "glob": {
+      if (dialect !== "sqlite") throw new Error("glob filters require SQLite");
+      return `${name} GLOB '${r.value.replace(/'/g, "''")}'`;
+    }
     case "equals": return `${name} = ${sqlLit(r.value, numeric)}`;
     case "not_equals": return `${name} <> ${sqlLit(r.value, numeric)}`;
     case "lt": return `${name} < ${sqlLit(r.value, numeric)}`;

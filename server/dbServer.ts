@@ -93,9 +93,9 @@ export function discoverDatabases(cwdRaw: string): DbFile[] {
 }
 
 function readCols(db: Database, name: string, isView: boolean): DbColumn[] {
-  const info = db.query<{ name: string; type: string; notnull: number; pk: number; dflt_value: unknown }, []>(
-    `PRAGMA table_info(${quoteIdent(name)})`,
-  ).all();
+  const info = db.query<{ name: string; type: string; notnull: number; pk: number; dflt_value: unknown; hidden: number }, []>(
+    `PRAGMA table_xinfo(${quoteIdent(name)})`,
+  ).all().filter((column) => column.hidden !== 1);
   // foreign keys (tables only; views have none)
   let fkMap: Record<string, string> = {};
   if (!isView) {
@@ -112,6 +112,7 @@ function readCols(db: Database, name: string, isView: boolean): DbColumn[] {
     pk: c.pk > 0,
     fk: fkMap[c.name] ?? null,
     defaultValue: c.dflt_value == null ? null : String(c.dflt_value),
+    generated: c.hidden === 2 || c.hidden === 3,
   }));
 }
 

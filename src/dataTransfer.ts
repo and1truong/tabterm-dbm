@@ -36,8 +36,9 @@ export function serializeRows(format: ExportFormat, columns: string[], rows: Rec
   }
   if (format === "sql") {
     if (!table) throw new Error("SQL export requires a table");
-    const names = columns.map((column) => `"${column.replace(/"/g, '""')}"`).join(", ");
-    return rows.map((row) => `INSERT INTO ${tableSql(table)} (${names}) VALUES (${columns.map((column) => sqlValue(row[column], !!table.schema)).join(", ")});`).join("\n") + "\n";
+    const writableColumns = columns.filter((column) => !table.columns.find((candidate) => candidate.name === column)?.generated);
+    const names = writableColumns.map((column) => `"${column.replace(/"/g, '""')}"`).join(", ");
+    return rows.map((row) => `INSERT INTO ${tableSql(table)} (${names}) VALUES (${writableColumns.map((column) => sqlValue(row[column], !!table.schema)).join(", ")});`).join("\n") + "\n";
   }
   return [columns.map(csvCell).join(","), ...displayRows.map((row) => columns.map((column) => csvCell(row[column])).join(","))].join("\n");
 }

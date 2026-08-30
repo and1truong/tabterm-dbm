@@ -37,3 +37,16 @@ test("exports reversible binary literals for SQLite and PostgreSQL", () => {
   expect(serializeRows("sql", ["payload"], rows, sqliteTable)).toContain("X'007FFF'");
   expect(serializeRows("sql", ["payload"], rows, table)).toContain("decode('007FFF', 'hex')");
 });
+
+test("omits generated columns from SQL exports", () => {
+  const generatedTable: DbTable = {
+    ...table,
+    columns: [
+      { name: "base", type: "integer", notNull: true, pk: false, fk: null },
+      { name: "doubled", type: "integer", notNull: true, pk: false, fk: null, generated: true },
+    ],
+  };
+  expect(serializeRows("sql", ["base", "doubled"], [{ base: 3, doubled: 6 }], generatedTable)).toBe(
+    'INSERT INTO "public"."users" ("base") VALUES (3);\n',
+  );
+});

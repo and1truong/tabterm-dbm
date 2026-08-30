@@ -2,21 +2,21 @@ import { Plus, X } from "lucide-react";
 import type { DbColumn } from "../shared.ts";
 import {
   type FilterModel, type FilterGroup, type FilterRule, type FilterOp,
-  opsFor, defaultOp, opNeedsValue, newRule, newGroup, MAX_DEPTH,
+  type DbDialect, opsFor, defaultOp, opNeedsValue, newRule, newGroup, MAX_DEPTH,
 } from "./dbFilter.ts";
 
-export function DatabaseFilterBuilder({ model, cols, onChange }: {
-  model: FilterModel; cols: DbColumn[]; onChange: (m: FilterModel) => void;
+export function DatabaseFilterBuilder({ model, cols, dialect, onChange }: {
+  model: FilterModel; cols: DbColumn[]; dialect: DbDialect; onChange: (m: FilterModel) => void;
 }) {
   return (
     <div className="border-b border-[var(--border)] bg-[var(--bg)] px-3 py-2">
-      <GroupView group={model} cols={cols} depth={0} onChange={onChange} />
+      <GroupView group={model} cols={cols} dialect={dialect} depth={0} onChange={onChange} />
     </div>
   );
 }
 
-function GroupView({ group, cols, depth, onChange, onRemove }: {
-  group: FilterGroup; cols: DbColumn[]; depth: number;
+function GroupView({ group, cols, dialect, depth, onChange, onRemove }: {
+  group: FilterGroup; cols: DbColumn[]; dialect: DbDialect; depth: number;
   onChange: (g: FilterGroup) => void; onRemove?: () => void;
 }) {
   const replaceChild = (id: string, next: FilterRule | FilterGroup) =>
@@ -62,11 +62,11 @@ function GroupView({ group, cols, depth, onChange, onRemove }: {
       <div className="flex flex-col gap-1">
         {group.rules.map((r) =>
           "rules" in r ? (
-            <GroupView key={r.id} group={r} cols={cols} depth={depth + 1}
+            <GroupView key={r.id} group={r} cols={cols} dialect={dialect} depth={depth + 1}
               onChange={(g) => replaceChild(r.id, g)}
               onRemove={() => removeChild(r.id)} />
           ) : (
-            <RuleView key={r.id} rule={r} cols={cols}
+            <RuleView key={r.id} rule={r} cols={cols} dialect={dialect}
               onChange={(nr) => replaceChild(r.id, nr)}
               onRemove={() => removeChild(r.id)} />
           ),
@@ -76,11 +76,11 @@ function GroupView({ group, cols, depth, onChange, onRemove }: {
   );
 }
 
-function RuleView({ rule, cols, onChange, onRemove }: {
-  rule: FilterRule; cols: DbColumn[]; onChange: (r: FilterRule) => void; onRemove: () => void;
+function RuleView({ rule, cols, dialect, onChange, onRemove }: {
+  rule: FilterRule; cols: DbColumn[]; dialect: DbDialect; onChange: (r: FilterRule) => void; onRemove: () => void;
 }) {
   const col = cols[rule.col];
-  const ops = opsFor(col?.type ?? "TEXT");
+  const ops = opsFor(col?.type ?? "TEXT", dialect);
   const needsValue = opNeedsValue(rule.op);
   // Changing the column resets the op to that type's default and clears the value,
   // so a stale numeric op never runs against a text column (or vice versa).
