@@ -214,6 +214,26 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
                      OR (candidate.typtype = 'm' AND l.typname IN ('anymultirange','anycompatiblemultirange') AND r.typname IN ('anymultirange','anycompatiblemultirange'))
                    )
                 ))
+       ), array_element_comparable AS (
+         SELECT candidate.oid
+           FROM pg_type candidate
+          WHERE EXISTS (
+            SELECT 1
+              FROM pg_opclass opc
+              JOIN pg_am am ON am.oid = opc.opcmethod
+              JOIN pg_type input_type ON input_type.oid = opc.opcintype
+             WHERE opc.opcdefault AND am.amname IN ('btree','hash') AND (
+               opc.opcintype = candidate.oid
+               OR EXISTS (
+                 SELECT 1 FROM pg_cast c
+                  WHERE c.castsource = candidate.oid AND c.casttarget = opc.opcintype
+                    AND c.castcontext = 'i' AND c.castmethod = 'b'
+               )
+               OR (candidate.typtype = 'e' AND input_type.typname = 'anyenum')
+               OR (candidate.typtype = 'r' AND input_type.typname IN ('anyrange','anycompatiblerange'))
+               OR (candidate.typtype = 'm' AND input_type.typname IN ('anymultirange','anycompatiblemultirange'))
+             )
+          )
        )
        SELECT n.nspname AS table_schema, rel.relname AS table_name, a.attname AS column_name,
               directly_comparable.oid IS NOT NULL OR (
@@ -235,7 +255,7 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
          LEFT JOIN directly_comparable ON directly_comparable.oid = effective.oid
          LEFT JOIN pg_type element ON element.oid = effective.typelem
          LEFT JOIN pg_type effective_element ON effective_element.oid = COALESCE(NULLIF(element.typbasetype, 0), element.oid)
-         LEFT JOIN directly_comparable element_comparable ON element_comparable.oid = effective_element.oid
+         LEFT JOIN array_element_comparable element_comparable ON element_comparable.oid = effective_element.oid
         WHERE rel.relkind IN ('r','p','v','m','f')
           AND n.nspname NOT IN ('pg_catalog','information_schema')`,
     ) as Record<string, unknown>[];
