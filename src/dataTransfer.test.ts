@@ -50,3 +50,13 @@ test("omits generated columns from SQL exports", () => {
     'INSERT INTO "public"."users" ("base") VALUES (3);\n',
   );
 });
+
+test("omits identity columns and falls back to default-only inserts", () => {
+  const identityTable: DbTable = {
+    ...table,
+    columns: [{ name: "id", type: "integer", notNull: true, pk: true, fk: null, identity: true }],
+  };
+  expect(serializeRows("sql", ["id"], [{ id: 7 }, { id: 8 }], identityTable)).toBe(
+    'INSERT INTO "public"."users" DEFAULT VALUES;\nINSERT INTO "public"."users" DEFAULT VALUES;\n',
+  );
+});

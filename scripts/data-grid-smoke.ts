@@ -54,18 +54,19 @@ async function exercise(width: number) {
       columns: [
         { name: "id", type: "integer", notNull: true, pk: true, fk: null },
         { name: "name", type: "text", notNull: true, pk: false, fk: null },
+        { name: "computed", type: "integer", notNull: true, pk: false, fk: null, generated: true },
       ],
     },
     source: { kind: "sqlite", path: "/tmp/smoke.sqlite" },
     writable: true,
-    columns: ["id", "name"],
+    columns: ["id", "name", "computed"],
     result: {
-      columns: ["id", "name"],
+      columns: ["id", "name", "computed"],
       rows: [
-        { id: 1, name: "Ada" },
-        { id: 2, name: "G".repeat(200) },
-        { id: 3, name: { __tabtermDbmWire: { kind: "binary", base64: "AA==" } } },
-        { id: 4, name: { ok: true } },
+        { id: 1, name: "Ada", computed: 2 },
+        { id: 2, name: "G".repeat(200), computed: 4 },
+        { id: 3, name: { __tabtermDbmWire: { kind: "binary", base64: "AA==" } }, computed: 6 },
+        { id: 4, name: { ok: true }, computed: 8 },
       ],
       ms: 1.2,
       hasMore: true,
@@ -79,7 +80,7 @@ async function exercise(width: number) {
     onPageSize: (size: number) => events.push(`size:${size}`),
     onDirtyChange: (dirty: boolean) => events.push(`dirty:${dirty}`),
     onApplied: () => events.push("applied"),
-    onExportAll: async () => ({ columns: ["id", "name"], rows: [{ id: 1, name: "Ada" }, { id: 2, name: "Grace" }] }),
+    onExportAll: async () => ({ columns: ["id", "name", "computed"], rows: [{ id: 1, name: "Ada", computed: 2 }, { id: 2, name: "Grace", computed: 4 }] }),
   })));
 
   const byLabel = (label: string) => container.querySelector(`[aria-label="${label}"]`) as HTMLElement | null;
@@ -96,7 +97,7 @@ async function exercise(width: number) {
   if (!copy) fail(`${width}px: copy control is not visible`);
   copy.click();
   await settle();
-  if (clipboard !== "id,name\n1,Ada") fail(`${width}px: selected-row CSV was ${JSON.stringify(clipboard)}`);
+  if (clipboard !== "id,name,computed\n1,Ada,2") fail(`${width}px: selected-row CSV was ${JSON.stringify(clipboard)}`);
 
   const next = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Next");
   if (!next || next.hasAttribute("disabled")) fail(`${width}px: next page is not available`);
@@ -113,7 +114,7 @@ async function exercise(width: number) {
   if (!events.includes("size:50")) fail(`${width}px: page-size interaction did not fire`);
   if (!container.textContent?.includes("1–4+")) fail(`${width}px: result range is missing`);
 
-  const columnsButton = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Columns 2/2");
+  const columnsButton = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Columns 3/3");
   columnsButton?.click();
   await settle();
   if (!container.querySelectorAll('input[type="checkbox"]').length) fail(`${width}px: column chooser is missing`);
@@ -135,6 +136,12 @@ async function exercise(width: number) {
   objectCell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
   await settle();
   if (byLabel("Edit row 4 name")) fail(`${width}px: object-valued cell incorrectly opened the text editor`);
+
+  const generatedCell = container.querySelectorAll("tbody tr")[0]?.querySelectorAll("td")[3] as HTMLElement | undefined;
+  if (!generatedCell) fail(`${width}px: generated cell is missing`);
+  generatedCell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  if (byLabel("Edit row 1 computed")) fail(`${width}px: generated cell incorrectly opened the editor`);
 
   const addRow = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Add row");
   addRow?.click();

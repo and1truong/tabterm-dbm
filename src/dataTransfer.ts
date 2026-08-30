@@ -36,7 +36,13 @@ export function serializeRows(format: ExportFormat, columns: string[], rows: Rec
   }
   if (format === "sql") {
     if (!table) throw new Error("SQL export requires a table");
-    const writableColumns = columns.filter((column) => !table.columns.find((candidate) => candidate.name === column)?.generated);
+    const writableColumns = columns.filter((column) => {
+      const metadata = table.columns.find((candidate) => candidate.name === column);
+      return !metadata?.generated && !metadata?.identity;
+    });
+    if (!writableColumns.length) {
+      return rows.map(() => `INSERT INTO ${tableSql(table)} DEFAULT VALUES;`).join("\n") + "\n";
+    }
     const names = writableColumns.map((column) => `"${column.replace(/"/g, '""')}"`).join(", ");
     return rows.map((row) => `INSERT INTO ${tableSql(table)} (${names}) VALUES (${writableColumns.map((column) => sqlValue(row[column], !!table.schema)).join(", ")});`).join("\n") + "\n";
   }

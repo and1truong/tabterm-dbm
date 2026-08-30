@@ -116,7 +116,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   // Fresh table → fresh filter + drop stale rows.
   useEffect(() => {
     setFilterModel(newGroup()); setSorts([]); setPage(0); setResult(null);
-  }, [activeTable]);
+  }, [activeTable, sourceKey]);
 
   // Debounced reload: pane switch, db/table change, or filter edit.
   useEffect(() => {
@@ -580,7 +580,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                   const isNull = value === null || value === undefined;
                   const isNum = typeof value === "number";
                   const column = table.columns.find((candidate) => candidate.name === c);
-                  const canEditCell = canEditRows && (v == null || typeof v !== "object");
+                  const canEditCell = canEditRows && !column?.generated && (v == null || typeof v !== "object");
                   return (
                     <td key={c} onDoubleClick={() => canEditCell && !deleted.has(i) && setEditing(stagedKey)}
                       className={"px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)] align-top " + (isNum ? "text-right " : "") + (stagedKey in edits ? "bg-[var(--accent)]/10 " : "") + (canEditCell ? "cursor-text" : "")}>

@@ -90,12 +90,10 @@ function compileRuleExec(r: FilterRule, cols: DbColumn[], params: unknown[], dia
     case "contains": params.push(`%${r.value}%`); return `${name} LIKE ?`;
     case "not_contains": params.push(`%${r.value}%`); return `${name} NOT LIKE ?`;
     case "regex": {
-      if (dialect !== "postgres") throw new Error("regex filters require PostgreSQL");
-      params.push(r.value); return `${name} ~ ?`;
+      params.push(r.value); return `${name} ${dialect === "postgres" ? "~" : "GLOB"} ?`;
     }
     case "glob": {
-      if (dialect !== "sqlite") throw new Error("glob filters require SQLite");
-      params.push(r.value); return `${name} GLOB ?`;
+      params.push(r.value); return `${name} ${dialect === "postgres" ? "~" : "GLOB"} ?`;
     }
     case "equals": { if (numeric) { const n = numOrThrow(r.value); params.push(n); return `${name} = ?`; } params.push(r.value); return `${name} = ?`; }
     case "not_equals": { if (numeric) { params.push(numOrThrow(r.value)); return `${name} <> ?`; } params.push(r.value); return `${name} <> ?`; }
@@ -136,12 +134,10 @@ function compileRulePreview(r: FilterRule, cols: DbColumn[], dialect: DbDialect)
     case "contains": return `${name} LIKE '%${r.value.replace(/'/g, "''")}%'`;
     case "not_contains": return `${name} NOT LIKE '%${r.value.replace(/'/g, "''")}%'`;
     case "regex": {
-      if (dialect !== "postgres") throw new Error("regex filters require PostgreSQL");
-      return `${name} ~ '${r.value.replace(/'/g, "''")}'`;
+      return `${name} ${dialect === "postgres" ? "~" : "GLOB"} '${r.value.replace(/'/g, "''")}'`;
     }
     case "glob": {
-      if (dialect !== "sqlite") throw new Error("glob filters require SQLite");
-      return `${name} GLOB '${r.value.replace(/'/g, "''")}'`;
+      return `${name} ${dialect === "postgres" ? "~" : "GLOB"} '${r.value.replace(/'/g, "''")}'`;
     }
     case "equals": return `${name} = ${sqlLit(r.value, numeric)}`;
     case "not_equals": return `${name} <> ${sqlLit(r.value, numeric)}`;

@@ -69,6 +69,13 @@ describe("compileGroup", () => {
     const m: FilterModel = { id: "g", combinator: "AND", rules: [{ ...newRule(cols), col: 1, op: "glob", value: "A*" }] };
     expect(compileGroup(m, cols, "sqlite")).toEqual({ where: '("name" GLOB ?)', params: ["A*"] });
   });
+
+  test("safely compiles a stale dialect-specific rule during source switches", () => {
+    const regex: FilterModel = { id: "g", combinator: "AND", rules: [{ ...newRule(cols), col: 1, op: "regex", value: "A*" }] };
+    const glob: FilterModel = { id: "g", combinator: "AND", rules: [{ ...newRule(cols), col: 1, op: "glob", value: "^A" }] };
+    expect(compileGroup(regex, cols, "sqlite").where).toBe('("name" GLOB ?)');
+    expect(compileGroup(glob, cols, "postgres").where).toBe('("name" ~ ?)');
+  });
 });
 
 describe("previewWhere", () => {
