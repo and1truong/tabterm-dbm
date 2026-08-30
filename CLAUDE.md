@@ -42,7 +42,7 @@ See `README.md`.
 ## Host contract (`@tabterm/module-host`)
 
 - **Vendored** under `vendor/module-host/`, resolved via `file:./vendor/module-host` — no
-  registry dependency. Pinned to `0.8.0` (see `vendor/README.md`).
+  registry dependency. Pinned to `0.14.0` (see `vendor/README.md`).
 - Refresh it with `make vendor TABTERM=<path-to-tabterm>` when the contract changes, then
   bump `vendor/module-host/package.json`.
 - `react` / `react-dom` are **host-provided** at runtime (externalized in the module

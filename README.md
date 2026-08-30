@@ -21,6 +21,12 @@ a mode-rail database manager:
 
 Extracted from the tabterm monorepo (`modules/dbm/`) into its own repository.
 
+Database pages are deep-linkable under `/<workspace>/dbm/<table>`: the table-only URL
+opens Structure, while `/data`, `/query`, `/insight`, `/pragmas`, and `/relationships`
+open the corresponding page. Database-wide Create View and Migration Studio use
+`/<workspace>/dbm/new-view` and `/<workspace>/dbm/migration`. Browser back/forward
+restores the selected page.
+
 ## Layout
 
 ```

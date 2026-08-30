@@ -19,6 +19,8 @@ import type { ExportFormat } from "./dataTransfer.ts";
 import { schemaRelations, schemaToMermaid } from "./schemaDiagram.ts";
 import { DatabaseMigrationModal } from "./DatabaseMigrationModal.tsx";
 import { binaryByteLength, isDbBinaryValue, unwrapDbValueForDisplay } from "../binaryValues.ts";
+import { dbRoutePath, parseDbRoute, sameRoutePath } from "./dbRoute.ts";
+import type { DbModal, DbPane } from "./dbRoute.ts";
 
 // Short label for the database chip in the header.
 function sourceChip(src: DbSource | null): string {
@@ -33,8 +35,6 @@ function displayDbValue(value: unknown): string {
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
-type Pane = "structure" | "data" | "sql" | "diagram" | "insights" | "pragmas";
-
 export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId: string }) {
   // cwd is read reactively from the host's app-state projection (not the core
   // store, which modules can't import). Re-renders on cwd change, preserving the
@@ -48,7 +48,9 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   const [activeSource, setActiveSource] = useState<DbSource | null>(null);
   const [schema, setSchema] = useState<DbSchema | null>(null);
   const [activeTable, setActiveTable] = useState<string | null>(null);
-  const [pane, setPane] = useState<Pane>("data");
+  const [routePath, setRoutePath] = useState<string[]>(() => host.navigation.path());
+  const route = parseDbRoute(routePath);
+  const pane = route.pane;
   const [writable, setWritable] = useState(false);
   const [result, setResult] = useState<QueryResult | null>(null);
   const [page, setPage] = useState(0);
@@ -59,8 +61,25 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   const [pickerOpen, setPickerOpen] = useState<false | "open" | "create">(false);
   const [filterModel, setFilterModel] = useState<FilterModel>(() => newGroup());
   const [filterOpen, setFilterOpen] = useState(false);
-  const [createViewOpen, setCreateViewOpen] = useState(false);
-  const [migrationOpen, setMigrationOpen] = useState(false);
+  const modalReturnPathRef = useRef<string[] | null>(null);
+
+  useEffect(() => host.navigation.subscribe(setRoutePath), [host]);
+
+  const navigate = useCallback((table: string, nextPane: DbPane, modal: DbModal | null = null, replace = false) => {
+    host.navigation.navigate(dbRoutePath(table, nextPane, modal), { replace });
+  }, [host]);
+  const openRouteModal = useCallback((modal: DbModal) => {
+    modalReturnPathRef.current = dbRoutePath(activeTable, pane);
+    host.navigation.navigate(dbRoutePath(null, pane, modal));
+  }, [activeTable, pane, host]);
+  const closeRouteModal = useCallback(() => {
+    const target = modalReturnPathRef.current ?? dbRoutePath(activeTable, activeTable ? "structure" : "data");
+    modalReturnPathRef.current = null;
+    host.navigation.navigate(target, { replace: true });
+  }, [activeTable, host]);
+  useEffect(() => {
+    if (!route.modal) modalReturnPathRef.current = null;
+  }, [route.modal]);
 
   // discover on cwd change
   const refreshDbs = useCallback(async () => {
@@ -85,10 +104,29 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
     if (!activeSource) return;
     setWritable(false);
     let cancel = false;
-    dbApi.schema(activeSource).then((s) => { if (!cancel) { setSchema(s); setActiveTable(s.tables[0] ? tableKey(s.tables[0]) : null); } })
+    dbApi.schema(activeSource).then((s) => { if (!cancel) setSchema(s); })
       .catch((e) => !cancel && setErr(String(e)));
     return () => { cancel = true; };
   }, [sourceKey]);
+
+  // Resolve deep links after the schema arrives. Bare and invalid routes are
+  // replaced with a canonical URL for the selected (or first) table.
+  useEffect(() => {
+    if (!schema) return;
+    const requested = route.table && schema.tables.some((table) => tableKey(table) === route.table)
+      ? route.table
+      : null;
+    const retained = route.modal && activeTable && schema.tables.some((table) => tableKey(table) === activeTable)
+      ? activeTable
+      : null;
+    const selected = requested ?? retained ?? (schema.tables[0] ? tableKey(schema.tables[0]) : null);
+    setActiveTable(selected);
+    if (!selected) return;
+    const canonical = route.modal && !route.table
+      ? dbRoutePath(null, route.pane, route.modal)
+      : dbRoutePath(selected, route.pane, route.modal);
+    if (!sameRoutePath(routePath, canonical)) host.navigation.navigate(canonical, { replace: true });
+  }, [schema, activeTable, route.table, route.pane, route.modal, routePath, host]);
 
   // Latest compiled query for the active table + filter. Recomputed each render
   // (cheap) so the debounced reload always fires against current state, dodging
@@ -170,11 +208,11 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
         writable={writable} canWrite={canWrite} environment={environment} onToggleRw={() => canWrite && setWritable((w) => !w)}
         onPick={() => setPickerOpen("open")} onCreate={() => setPickerOpen("create")} onRefresh={() => void refreshDbs()}
         filterOpen={filterOpen} onToggleFilter={() => setFilterOpen((v) => !v)} filterActive={groupHasActive(filterModel)}
-        canNewView={writable && !!activeSource} onNewView={() => setCreateViewOpen(true)} onMigration={() => setMigrationOpen(true)} locked={dataDirty} />
+        canNewView={writable && !!activeSource} onNewView={() => openRouteModal("new-view")} onMigration={() => openRouteModal("migration")} locked={dataDirty} />
 
       <div className="flex gap-1 px-3 pt-1.5 bg-[var(--bg)] overflow-x-auto shrink-0">
-        {(["structure", "data", "sql", "diagram", "insights", "pragmas"] as Pane[]).map((t) => (
-          <button key={t} onClick={() => setPane(t)} disabled={dataDirty && t !== "data"}
+        {(["structure", "data", "sql", "diagram", "insights", "pragmas"] as DbPane[]).map((t) => (
+          <button key={t} onClick={() => activeTable && navigate(activeTable, t)} disabled={dataDirty && t !== "data"}
             className={"px-3 py-1.5 text-xs font-bold rounded-t-lg " + (pane === t ? "bg-[var(--panel)] text-[var(--text)] border border-[var(--border)] border-b-0" : "text-[var(--muted)]")}>
             {t === "data" ? "Browse Data" : t === "diagram" ? "Relationships" : t[0].toUpperCase() + t.slice(1)}
           </button>
@@ -182,7 +220,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
       </div>
 
       <div className="flex-1 grid bg-[var(--panel)] border-t border-[var(--border)]" style={{ gridTemplateColumns: "212px 1fr" }}>
-        <ObjectTree schema={schema} activeTable={activeTable} onSelect={setActiveTable} locked={dataDirty} />
+        <ObjectTree schema={schema} activeTable={activeTable} onSelect={(table) => navigate(table, pane)} locked={dataDirty} />
         <div className="flex flex-col min-w-0">
           {err && <Notice variant="error" layout="inline" className="px-3 py-2 text-xs">{err}</Notice>}
           {pane === "data" && activeTbl && activeSource && (
@@ -228,12 +266,12 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
           onClose={() => setPickerOpen(false)}
           onOpen={(src) => { setActiveSource(src); setPickerOpen(false); void refreshDbs(); }} />
       )}
-      {createViewOpen && activeSource && (
+      {route.modal === "new-view" && activeSource && (
         <DatabaseCreateViewModal source={activeSource}
-          onClose={() => setCreateViewOpen(false)} onCreated={() => { void reloadSchema(); }} />
+          onClose={closeRouteModal} onCreated={() => { void reloadSchema(); }} />
       )}
-      {migrationOpen && activeSource && (
-        <DatabaseMigrationModal source={activeSource} onClose={() => setMigrationOpen(false)} onApplied={reloadSchema} />
+      {route.modal === "migration" && activeSource && (
+        <DatabaseMigrationModal source={activeSource} onClose={closeRouteModal} onApplied={reloadSchema} />
       )}
     </div>
   );
