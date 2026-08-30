@@ -70,15 +70,21 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   useEffect(() => host.navigation.subscribe((nextPath) => {
     const currentPath = routePathRef.current;
     if (shouldBlockRouteChange(currentPath, nextPath, dataDirtyRef.current)) {
-      // Push the accepted route back on top. Replacing here would erase the
-      // history entry the user tried to visit, so it would be unavailable once
-      // the staged changes are applied or cancelled.
-      host.navigation.navigate(currentPath);
+      // Keep rendering the accepted route without mutating browser history.
+      // Once edits are applied or cancelled, the effect below follows whatever
+      // Back/Forward destination the browser currently points at.
       return;
     }
     routePathRef.current = nextPath;
     setRoutePath(nextPath);
   }), [host]);
+  useEffect(() => {
+    if (dataDirty) return;
+    const currentPath = host.navigation.path();
+    if (sameRoutePath(routePathRef.current, currentPath)) return;
+    routePathRef.current = currentPath;
+    setRoutePath(currentPath);
+  }, [dataDirty, host]);
 
   const navigate = useCallback((table: string | null, nextPane: DbPane) => {
     host.navigation.navigate(dbRoutePath(table, nextPane));
@@ -88,8 +94,12 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
     host.navigation.navigate(dbRoutePath(null, pane, modal));
   }, [activeTable, pane, host]);
   const closeRouteModal = useCallback(() => {
-    const target = modalReturnPathRef.current ?? dbRoutePath(activeTable, activeTable ? "structure" : "data");
-    modalReturnPathRef.current = null;
+    if (modalReturnPathRef.current) {
+      modalReturnPathRef.current = null;
+      window.history.back();
+      return;
+    }
+    const target = dbRoutePath(activeTable, activeTable ? "structure" : "data");
     host.navigation.navigate(target, { replace: true });
   }, [activeTable, host]);
   useEffect(() => {
