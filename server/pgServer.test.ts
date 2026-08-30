@@ -82,7 +82,12 @@ pgDescribe("pgServer (live)", () => {
 
   test("exec rejects nothing / read+schema round-trip", async () => {
     await runPgExec(url, `DROP TABLE IF EXISTS ${T}`);
-    await runPgExec(url, `CREATE TABLE ${T} (id serial PRIMARY KEY, email text NOT NULL, age int, document xml)`);
+    await runPgExec(url, `DROP TYPE IF EXISTS ${T}_mood`);
+    await runPgExec(url, `CREATE TYPE ${T}_mood AS ENUM ('active', 'paused')`);
+    await runPgExec(url, `CREATE TABLE ${T} (
+      id serial PRIMARY KEY, email text NOT NULL, age int, document xml,
+      mood ${T}_mood, tags text[], active_period int4range, raw_documents xml[]
+    )`);
     const ins = await runPgExec(url, `INSERT INTO ${T} (email, age) VALUES ('a@x', 21), ('b@x', 9)`);
     expect(ins.rowsAffected).toBe(2);
 
@@ -90,14 +95,19 @@ pgDescribe("pgServer (live)", () => {
     const tbl = schema.tables.find((t) => t.name === T);
     expect(tbl).toBeTruthy();
     expect(tbl!.schema).toBe("public");
-    expect(tbl!.columns.map((c) => c.name)).toEqual(["id", "email", "age", "document"]);
+    expect(tbl!.columns.map((c) => c.name)).toEqual(["id", "email", "age", "document", "mood", "tags", "active_period", "raw_documents"]);
     expect(tbl!.columns.find((c) => c.name === "id")!.pk).toBe(true);
     expect(tbl!.columns.find((c) => c.name === "email")!.notNull).toBe(true);
     expect(tbl!.columns.find((c) => c.name === "email")!.comparable).toBe(true);
     expect(tbl!.columns.find((c) => c.name === "document")!.comparable).toBe(false);
+    expect(tbl!.columns.find((c) => c.name === "mood")!.comparable).toBe(true);
+    expect(tbl!.columns.find((c) => c.name === "tags")!.comparable).toBe(true);
+    expect(tbl!.columns.find((c) => c.name === "active_period")!.comparable).toBe(true);
+    expect(tbl!.columns.find((c) => c.name === "raw_documents")!.comparable).toBe(false);
     expect(schema.pragmas.database).toBeTruthy();
 
     await runPgExec(url, `DROP TABLE ${T}`);
+    await runPgExec(url, `DROP TYPE ${T}_mood`);
   });
 
   test("query rewrites ? params and returns rows", async () => {

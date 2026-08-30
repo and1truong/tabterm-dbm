@@ -187,26 +187,55 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
     ]));
 
     const comparableRows = await db.unsafe(
-      `SELECT n.nspname AS table_schema, rel.relname AS table_name, a.attname AS column_name,
-              EXISTS (
-                SELECT 1
-                  FROM pg_operator o
-                 WHERE o.oprname = '=' AND o.oprkind = 'b' AND o.oprresult = 'boolean'::regtype
-                   AND (o.oprleft = COALESCE(NULLIF(t.typbasetype, 0), t.oid) OR EXISTS (
-                     SELECT 1 FROM pg_cast c
-                      WHERE c.castsource = COALESCE(NULLIF(t.typbasetype, 0), t.oid)
-                        AND c.casttarget = o.oprleft AND c.castcontext = 'i'
-                   ))
-                   AND (o.oprright = COALESCE(NULLIF(t.typbasetype, 0), t.oid) OR EXISTS (
-                     SELECT 1 FROM pg_cast c
-                      WHERE c.castsource = COALESCE(NULLIF(t.typbasetype, 0), t.oid)
-                        AND c.casttarget = o.oprright AND c.castcontext = 'i'
-                   ))
+      `WITH directly_comparable AS (
+         SELECT candidate.oid
+           FROM pg_type candidate
+          WHERE EXISTS (
+                  SELECT 1
+                    FROM pg_operator o
+                   WHERE o.oprname = '=' AND o.oprkind = 'b' AND o.oprresult = 'boolean'::regtype
+                     AND (o.oprleft = candidate.oid OR EXISTS (
+                       SELECT 1 FROM pg_cast c
+                        WHERE c.castsource = candidate.oid AND c.casttarget = o.oprleft AND c.castcontext = 'i'
+                     ))
+                     AND (o.oprright = candidate.oid OR EXISTS (
+                       SELECT 1 FROM pg_cast c
+                        WHERE c.castsource = candidate.oid AND c.casttarget = o.oprright AND c.castcontext = 'i'
+                     ))
+                )
+             OR (candidate.typtype IN ('e','r','m') AND EXISTS (
+                  SELECT 1
+                    FROM pg_operator o
+                    JOIN pg_type l ON l.oid = o.oprleft
+                    JOIN pg_type r ON r.oid = o.oprright
+                   WHERE o.oprname = '=' AND (
+                     (candidate.typtype = 'e' AND l.typname = 'anyenum' AND r.typname = 'anyenum')
+                     OR (candidate.typtype = 'r' AND l.typname IN ('anyrange','anycompatiblerange') AND r.typname IN ('anyrange','anycompatiblerange'))
+                     OR (candidate.typtype = 'm' AND l.typname IN ('anymultirange','anycompatiblemultirange') AND r.typname IN ('anymultirange','anycompatiblemultirange'))
+                   )
+                ))
+       )
+       SELECT n.nspname AS table_schema, rel.relname AS table_name, a.attname AS column_name,
+              directly_comparable.oid IS NOT NULL OR (
+                effective.typelem <> 0 AND element_comparable.oid IS NOT NULL AND EXISTS (
+                  SELECT 1
+                    FROM pg_operator o
+                    JOIN pg_type l ON l.oid = o.oprleft
+                    JOIN pg_type r ON r.oid = o.oprright
+                   WHERE o.oprname = '='
+                     AND l.typname IN ('anyarray','anycompatiblearray')
+                     AND r.typname IN ('anyarray','anycompatiblearray')
+                )
               ) AS is_comparable
          FROM pg_class rel
          JOIN pg_namespace n ON n.oid = rel.relnamespace
          JOIN pg_attribute a ON a.attrelid = rel.oid AND a.attnum > 0 AND NOT a.attisdropped
          JOIN pg_type t ON t.oid = a.atttypid
+         JOIN pg_type effective ON effective.oid = COALESCE(NULLIF(t.typbasetype, 0), t.oid)
+         LEFT JOIN directly_comparable ON directly_comparable.oid = effective.oid
+         LEFT JOIN pg_type element ON element.oid = effective.typelem
+         LEFT JOIN pg_type effective_element ON effective_element.oid = COALESCE(NULLIF(element.typbasetype, 0), element.oid)
+         LEFT JOIN directly_comparable element_comparable ON element_comparable.oid = effective_element.oid
         WHERE rel.relkind IN ('r','p','v','m','f')
           AND n.nspname NOT IN ('pg_catalog','information_schema')`,
     ) as Record<string, unknown>[];
