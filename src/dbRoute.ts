@@ -10,6 +10,7 @@ export interface DbRoute {
 const ACTION_SEGMENT = "actions";
 
 const segmentToPane: Record<string, DbPane> = {
+  structure: "structure",
   data: "data",
   query: "sql",
   relationships: "diagram",
@@ -25,13 +26,23 @@ const paneToSegment: Partial<Record<DbPane, string>> = {
   pragmas: "pragmas",
 };
 
+const modalPaneToSegment: Record<DbPane, string> = {
+  structure: "structure",
+  data: "data",
+  sql: "query",
+  diagram: "relationships",
+  insights: "insight",
+  pragmas: "pragmas",
+};
+
 export function parseDbRoute(path: readonly string[], knownTables?: readonly string[]): DbRoute {
   const table = path[0] ?? null;
   if (!table) return { table: null, pane: "data", modal: null };
 
   const section = path[1];
   if (table === ACTION_SEGMENT && (section === "new-view" || section === "migration")) {
-    return { table: null, pane: "data", modal: section };
+    const modalPane = path[2] ? (segmentToPane[path[2]] ?? "data") : "data";
+    return { table: null, pane: modalPane, modal: section };
   }
 
   // A one-segment pane route keeps database-wide tools reachable when a schema
@@ -45,7 +56,7 @@ export function parseDbRoute(path: readonly string[], knownTables?: readonly str
 }
 
 export function dbRoutePath(table: string | null, pane: DbPane, modal: DbModal | null = null): string[] {
-  if (modal) return [ACTION_SEGMENT, modal];
+  if (modal) return pane === "data" ? [ACTION_SEGMENT, modal] : [ACTION_SEGMENT, modal, modalPaneToSegment[pane]];
   const section = paneToSegment[pane];
   if (!table) return section && pane !== "data" ? [section] : [];
   return section ? [table, section] : [table];

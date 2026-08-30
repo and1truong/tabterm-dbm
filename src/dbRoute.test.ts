@@ -29,11 +29,12 @@ describe("database module routes", () => {
     expect(tableRequiredForPane("sql")).toBeFalse();
   });
 
-  test("gives database-wide actions an unambiguous namespace", () => {
+  test("gives database-wide actions an unambiguous namespace and preserves their pane", () => {
     expect(parseDbRoute(["actions", "new-view"])).toEqual({ table: null, pane: "data", modal: "new-view" });
-    expect(parseDbRoute(["actions", "migration"])).toEqual({ table: null, pane: "data", modal: "migration" });
+    expect(parseDbRoute(["actions", "migration", "query"])).toEqual({ table: null, pane: "sql", modal: "migration" });
     expect(dbRoutePath(null, "data", "new-view")).toEqual(["actions", "new-view"]);
-    expect(dbRoutePath(null, "data", "migration")).toEqual(["actions", "migration"]);
+    expect(dbRoutePath(null, "sql", "migration")).toEqual(["actions", "migration", "query"]);
+    expect(dbRoutePath(null, "structure", "migration")).toEqual(["actions", "migration", "structure"]);
   });
 
   test("does not reserve action or pane names when they are real tables", () => {
