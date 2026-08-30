@@ -19,7 +19,7 @@ import type { ExportFormat } from "./dataTransfer.ts";
 import { schemaRelations, schemaToMermaid } from "./schemaDiagram.ts";
 import { DatabaseMigrationModal } from "./DatabaseMigrationModal.tsx";
 import { binaryByteLength, isDbBinaryValue, unwrapDbValueForDisplay } from "../binaryValues.ts";
-import { dbRoutePath, parseDbRoute, sameRoutePath } from "./dbRoute.ts";
+import { dbRoutePath, parseDbRoute, sameRoutePath, shouldBlockRouteChange, tableRequiredForPane } from "./dbRoute.ts";
 import type { DbModal, DbPane } from "./dbRoute.ts";
 
 // Short label for the database chip in the header.
@@ -49,7 +49,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   const [schema, setSchema] = useState<DbSchema | null>(null);
   const [activeTable, setActiveTable] = useState<string | null>(null);
   const [routePath, setRoutePath] = useState<string[]>(() => host.navigation.path());
-  const route = parseDbRoute(routePath);
+  const route = parseDbRoute(routePath, schema?.tables.map(tableKey));
   const pane = route.pane;
   const [writable, setWritable] = useState(false);
   const [result, setResult] = useState<QueryResult | null>(null);
@@ -62,11 +62,23 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   const [filterModel, setFilterModel] = useState<FilterModel>(() => newGroup());
   const [filterOpen, setFilterOpen] = useState(false);
   const modalReturnPathRef = useRef<string[] | null>(null);
+  const routePathRef = useRef(routePath);
+  const dataDirtyRef = useRef(dataDirty);
+  routePathRef.current = routePath;
+  dataDirtyRef.current = dataDirty;
 
-  useEffect(() => host.navigation.subscribe(setRoutePath), [host]);
+  useEffect(() => host.navigation.subscribe((nextPath) => {
+    const currentPath = routePathRef.current;
+    if (shouldBlockRouteChange(currentPath, nextPath, dataDirtyRef.current)) {
+      host.navigation.navigate(currentPath, { replace: true });
+      return;
+    }
+    routePathRef.current = nextPath;
+    setRoutePath(nextPath);
+  }), [host]);
 
-  const navigate = useCallback((table: string, nextPane: DbPane, modal: DbModal | null = null, replace = false) => {
-    host.navigation.navigate(dbRoutePath(table, nextPane, modal), { replace });
+  const navigate = useCallback((table: string | null, nextPane: DbPane) => {
+    host.navigation.navigate(dbRoutePath(table, nextPane));
   }, [host]);
   const openRouteModal = useCallback((modal: DbModal) => {
     modalReturnPathRef.current = dbRoutePath(activeTable, pane);
@@ -121,10 +133,9 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
       : null;
     const selected = requested ?? retained ?? (schema.tables[0] ? tableKey(schema.tables[0]) : null);
     setActiveTable(selected);
-    if (!selected) return;
-    const canonical = route.modal && !route.table
+    const canonical = route.modal
       ? dbRoutePath(null, route.pane, route.modal)
-      : dbRoutePath(selected, route.pane, route.modal);
+      : dbRoutePath(selected, route.pane);
     if (!sameRoutePath(routePath, canonical)) host.navigation.navigate(canonical, { replace: true });
   }, [schema, activeTable, route.table, route.pane, route.modal, routePath, host]);
 
@@ -212,7 +223,8 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
 
       <div className="flex gap-1 px-3 pt-1.5 bg-[var(--bg)] overflow-x-auto shrink-0">
         {(["structure", "data", "sql", "diagram", "insights", "pragmas"] as DbPane[]).map((t) => (
-          <button key={t} onClick={() => activeTable && navigate(activeTable, t)} disabled={dataDirty && t !== "data"}
+          <button key={t} onClick={() => navigate(activeTable, t)}
+            disabled={(!activeTable && tableRequiredForPane(t)) || (dataDirty && t !== "data")}
             className={"px-3 py-1.5 text-xs font-bold rounded-t-lg " + (pane === t ? "bg-[var(--panel)] text-[var(--text)] border border-[var(--border)] border-b-0" : "text-[var(--muted)]")}>
             {t === "data" ? "Browse Data" : t === "diagram" ? "Relationships" : t[0].toUpperCase() + t.slice(1)}
           </button>

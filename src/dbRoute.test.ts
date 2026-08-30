@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { dbRoutePath, parseDbRoute } from "./dbRoute.ts";
+import { dbRoutePath, parseDbRoute, shouldBlockRouteChange, tableRequiredForPane } from "./dbRoute.ts";
 
 describe("database module routes", () => {
   test("maps public URL sections to internal panes", () => {
-    expect(parseDbRoute(["users"])).toEqual({ table: "users", pane: "structure", modal: null });
+    expect(parseDbRoute(["users"], ["users"])).toEqual({ table: "users", pane: "structure", modal: null });
     expect(parseDbRoute(["users", "data"]).pane).toBe("data");
     expect(parseDbRoute(["users", "query"]).pane).toBe("sql");
     expect(parseDbRoute(["users", "insight"]).pane).toBe("insights");
@@ -19,16 +19,33 @@ describe("database module routes", () => {
     expect(dbRoutePath("public.users", "diagram")).toEqual(["public.users", "relationships"]);
   });
 
-  test("gives database-wide create-view and migration modals addressable routes", () => {
-    expect(parseDbRoute(["new-view"])).toEqual({ table: null, pane: "data", modal: "new-view" });
-    expect(parseDbRoute(["migration"])).toEqual({ table: null, pane: "data", modal: "migration" });
-    expect(dbRoutePath(null, "data", "new-view")).toEqual(["new-view"]);
-    expect(dbRoutePath(null, "data", "migration")).toEqual(["migration"]);
+  test("keeps database-wide panes reachable without a table", () => {
+    expect(parseDbRoute(["query"], [])).toEqual({ table: null, pane: "sql", modal: null });
+    expect(parseDbRoute(["pragmas"], [])).toEqual({ table: null, pane: "pragmas", modal: null });
+    expect(dbRoutePath(null, "sql")).toEqual(["query"]);
+    expect(dbRoutePath(null, "diagram")).toEqual(["relationships"]);
+    expect(tableRequiredForPane("structure")).toBeTrue();
+    expect(tableRequiredForPane("data")).toBeTrue();
+    expect(tableRequiredForPane("sql")).toBeFalse();
   });
 
-  test("also accepts table-scoped action links", () => {
-    expect(parseDbRoute(["users", "new-view"]).modal).toBe("new-view");
-    expect(parseDbRoute(["users", "migration"]).modal).toBe("migration");
+  test("gives database-wide actions an unambiguous namespace", () => {
+    expect(parseDbRoute(["actions", "new-view"])).toEqual({ table: null, pane: "data", modal: "new-view" });
+    expect(parseDbRoute(["actions", "migration"])).toEqual({ table: null, pane: "data", modal: "migration" });
+    expect(dbRoutePath(null, "data", "new-view")).toEqual(["actions", "new-view"]);
+    expect(dbRoutePath(null, "data", "migration")).toEqual(["actions", "migration"]);
+  });
+
+  test("does not reserve action or pane names when they are real tables", () => {
+    expect(parseDbRoute(["migration"], ["migration"])).toEqual({ table: "migration", pane: "structure", modal: null });
+    expect(parseDbRoute(["new-view", "data"], ["new-view"])).toEqual({ table: "new-view", pane: "data", modal: null });
+    expect(parseDbRoute(["query"], ["query"])).toEqual({ table: "query", pane: "structure", modal: null });
+  });
+
+  test("blocks route changes while staged row changes are dirty", () => {
+    expect(shouldBlockRouteChange(["users", "data"], ["users", "query"], true)).toBeTrue();
+    expect(shouldBlockRouteChange(["users", "data"], ["users", "data"], true)).toBeFalse();
+    expect(shouldBlockRouteChange(["users", "data"], ["users", "query"], false)).toBeFalse();
   });
 
   test("uses browse data while the database route has no selected table", () => {
