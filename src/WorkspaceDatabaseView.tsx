@@ -70,7 +70,10 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   useEffect(() => host.navigation.subscribe((nextPath) => {
     const currentPath = routePathRef.current;
     if (shouldBlockRouteChange(currentPath, nextPath, dataDirtyRef.current)) {
-      host.navigation.navigate(currentPath, { replace: true });
+      // Push the accepted route back on top. Replacing here would erase the
+      // history entry the user tried to visit, so it would be unavailable once
+      // the staged changes are applied or cancelled.
+      host.navigation.navigate(currentPath);
       return;
     }
     routePathRef.current = nextPath;
