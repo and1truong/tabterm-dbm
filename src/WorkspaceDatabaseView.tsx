@@ -166,7 +166,8 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
     queryRef.current = null;
   }
   const rowsContextRef = useRef("");
-  rowsContextRef.current = `${sourceKey ?? ""}\0${activeTable ?? ""}\0${route.table ?? ""}\0${pane}`;
+  const routedTableContext = route.modal ? activeTable : route.table;
+  rowsContextRef.current = `${sourceKey ?? ""}\0${activeTable ?? ""}\0${routedTableContext ?? ""}\0${pane}`;
 
   const loadRows = useCallback(async (signal?: AbortSignal) => {
     if (!activeSource || !queryRef.current) return;
@@ -293,11 +294,11 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
           onClose={() => setPickerOpen(false)}
           onOpen={(src) => { setActiveSource(src); setPickerOpen(false); void refreshDbs(); }} />
       )}
-      {route.modal === "new-view" && activeSource && (
+      {route.modal === "new-view" && activeSource && writable && (
         <DatabaseCreateViewModal source={activeSource}
           onClose={closeRouteModal} onCreated={() => { void reloadSchema(); }} />
       )}
-      {route.modal === "migration" && activeSource && (
+      {route.modal === "migration" && activeSource && writable && (
         <DatabaseMigrationModal source={activeSource} onClose={closeRouteModal} onApplied={reloadSchema} />
       )}
     </div>
