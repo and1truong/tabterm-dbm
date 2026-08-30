@@ -147,6 +147,7 @@ async function exercise(width: number) {
   addRow?.click();
   await settle();
   if (!byLabel("Close add row")) fail(`${width}px: add-row modal is not visible`);
+  if (byLabel("New computed")) fail(`${width}px: generated column is editable in the add-row modal`);
   const stageDefault = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Stage row");
   stageDefault?.click();
   await settle();
@@ -159,9 +160,14 @@ async function exercise(width: number) {
   await settle();
   const csvContent = container.querySelector('[aria-label="CSV content"]') as HTMLTextAreaElement | null;
   if (!csvContent) fail(`${width}px: CSV import modal is not visible`);
-  setValue(csvContent, "id,name\n3,Katherine\n4,Dorothy");
+  setValue(csvContent, "id,name,computed\n3,Katherine,6");
   await settle();
   const stageImport = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Stage import");
+  stageImport?.click();
+  await settle();
+  if (!container.textContent?.includes("not writable: computed")) fail(`${width}px: CSV import accepted a generated column`);
+  setValue(csvContent, "id,name\n3,Katherine\n4,Dorothy");
+  await settle();
   stageImport?.click();
   await settle();
   if (![...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 2 changes"))) fail(`${width}px: CSV rows were not staged`);

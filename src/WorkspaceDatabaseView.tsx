@@ -76,7 +76,11 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
 
   // load schema when a db is chosen
   useEffect(() => {
-    if (!activeSource) { setSchema(null); return; }
+    queryRef.current = null;
+    setSchema(null);
+    setActiveTable(null);
+    setResult(null);
+    if (!activeSource) return;
     setWritable(false);
     let cancel = false;
     dbApi.schema(activeSource).then((s) => { if (!cancel) { setSchema(s); setActiveTable(s.tables[0] ? tableKey(s.tables[0]) : null); } })
@@ -663,9 +667,10 @@ function InsertRowModal({ table, onClose, onAdd }: {
   onAdd: (values: Record<string, unknown>) => void;
 }) {
   const [values, setValues] = useState<Record<string, string>>({});
+  const writableColumns = table.columns.filter((column) => !column.generated && !column.identity);
   const submit = () => {
     const row: Record<string, unknown> = {};
-    for (const column of table.columns) {
+    for (const column of writableColumns) {
       const raw = values[column.name];
       if (raw !== undefined && raw !== "") row[column.name] = coerceCellValue(raw, column.type);
     }
@@ -679,7 +684,7 @@ function InsertRowModal({ table, onClose, onAdd }: {
           <button aria-label="Close add row" onClick={onClose} className="ml-auto text-[var(--muted)]">×</button>
         </div>
         <div className="overflow-auto p-4 grid gap-2">
-          {table.columns.map((column) => (
+          {writableColumns.map((column) => (
             <label key={column.name} className="grid grid-cols-[140px_1fr] items-center gap-3 text-xs">
               <span className="truncate text-[var(--muted)]" title={column.name}>{column.name}</span>
               <input aria-label={`New ${column.name}`} value={values[column.name] ?? ""}
@@ -688,7 +693,7 @@ function InsertRowModal({ table, onClose, onAdd }: {
                 className="mono min-w-0 rounded-md border border-[var(--border-2)] bg-[var(--bg)] px-2 py-1.5 text-[var(--text)] outline-none focus:border-[var(--accent)]" />
             </label>
           ))}
-          <span className="text-[10px] text-[var(--faint)]">Leave blank to use the database default; type NULL for SQL NULL.</span>
+          <span className="text-[10px] text-[var(--faint)]">Leave blank to use the database default; generated and identity columns are filled by the database.</span>
         </div>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-[var(--border)]">
           <button onClick={onClose} className="px-3 py-1.5 text-xs font-semibold text-[var(--muted)]">Cancel</button>
@@ -717,9 +722,12 @@ function ImportCsvModal({ table, onClose, onStage }: {
       if (!parsed.rows.length) throw new Error("CSV has no data rows");
       if (parsed.rows.length > 500) throw new Error("Import is limited to 500 rows per transaction");
       const known = new Map(table.columns.map((column) => [column.name, column]));
+      const writable = new Map(table.columns.filter((column) => !column.generated && !column.identity).map((column) => [column.name, column]));
       const unknown = parsed.columns.filter((column) => !known.has(column));
       if (unknown.length) throw new Error(`Unknown column${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
-      onStage(parsed.rows.map((row) => Object.fromEntries(parsed.columns.map((name) => [name, coerceCellValue(row[name], known.get(name)?.type ?? "")]))));
+      const readonly = parsed.columns.filter((column) => !writable.has(column));
+      if (readonly.length) throw new Error(`Generated or identity column${readonly.length === 1 ? " is" : "s are"} not writable: ${readonly.join(", ")}`);
+      onStage(parsed.rows.map((row) => Object.fromEntries(parsed.columns.map((name) => [name, coerceCellValue(row[name], writable.get(name)?.type ?? "")]))));
     } catch (stageError) { setError(String(stageError)); }
   };
   return (
