@@ -55,6 +55,9 @@ async function exercise(width: number) {
   const users = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("users"));
   users?.click();
   if (selected !== "public.users") fail(`${width}px: table selection did not preserve schema identity`);
+  flushSync(() => root.render(React.createElement(ObjectTree, { schema, activeTable: "public.users", locked: true, onSelect: () => {} })));
+  const lockedUsers = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("users")) as HTMLButtonElement | undefined;
+  if (!lockedUsers?.disabled) fail(`${width}px: active table remains navigable while row changes are staged`);
   flushSync(() => root.unmount());
   container.remove();
 
