@@ -52,7 +52,19 @@ async function exercise(width: number) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  flushSync(() => root.render(React.createElement(DataGrid, {
+  const baseResult = {
+    columns: ["id", "name", "computed"],
+    rows: [
+      { id: 1, name: "Ada", computed: 2 },
+      { id: 2, name: "G".repeat(200), computed: 4 },
+      { id: 3, name: { __tabtermDbmWire: { kind: "binary", base64: "AA==" } }, computed: 6 },
+      { id: 4, name: { ok: true }, computed: 8 },
+    ],
+    ms: 1.2,
+    hasMore: true,
+    offset: 0,
+  };
+  const gridProps = {
     table: {
       name: "users", type: "table", rowCount: -1, ddl: "",
       columns: [
@@ -64,18 +76,6 @@ async function exercise(width: number) {
     source: { kind: "sqlite", path: "/tmp/smoke.sqlite" },
     writable: true,
     columns: ["id", "name", "computed"],
-    result: {
-      columns: ["id", "name", "computed"],
-      rows: [
-        { id: 1, name: "Ada", computed: 2 },
-        { id: 2, name: "G".repeat(200), computed: 4 },
-        { id: 3, name: { __tabtermDbmWire: { kind: "binary", base64: "AA==" } }, computed: 6 },
-        { id: 4, name: { ok: true }, computed: 8 },
-      ],
-      ms: 1.2,
-      hasMore: true,
-      offset: 0,
-    },
     sorts: [],
     pageSize: 100,
     onSort: (column: string, additive: boolean) => events.push(`sort:${column}:${additive}`),
@@ -85,7 +85,10 @@ async function exercise(width: number) {
     onDirtyChange: (dirty: boolean) => events.push(`dirty:${dirty}`),
     onApplied: () => events.push("applied"),
     onExportAll: async () => ({ columns: ["id", "name", "computed"], rows: [{ id: 1, name: "Ada", computed: 2 }, { id: 2, name: "Grace", computed: 4 }] }),
-  })));
+  };
+  const render = (result: typeof baseResult) =>
+    flushSync(() => root.render(React.createElement(DataGrid, { ...gridProps, result })));
+  render(baseResult);
 
   const byLabel = (label: string) => container.querySelector(`[aria-label="${label}"]`) as HTMLElement | null;
   const sort = byLabel("Sort by name");
@@ -224,6 +227,21 @@ async function exercise(width: number) {
   await settle();
   if (!events.includes("dirty:true")) fail(`${width}px: staged edit did not lock navigation`);
   if (!events.includes("applied")) fail(`${width}px: apply transaction did not complete`);
+
+  // A refresh landing after an edit is staged must drop index-keyed staging,
+  // or the change would retarget onto whatever row now holds that index.
+  const adaAgain = [...container.querySelectorAll("td")].find((cell) => cell.textContent?.trim() === "Ada");
+  adaAgain?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  const lateEditor = byLabel("Edit row 1 name") as HTMLInputElement | null;
+  if (!lateEditor) fail(`${width}px: cell editor did not reopen for the result-replacement check`);
+  lateEditor.value = "Augusta";
+  lateEditor.dispatchEvent(new Event("focusout", { bubbles: true }));
+  await settle();
+  if (![...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: re-staged edit is missing`);
+  render({ ...baseResult, rows: [...baseResult.rows].reverse() });
+  await settle();
+  if ([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: staged edit survived a result replacement`);
 
   flushSync(() => root.unmount());
   container.remove();

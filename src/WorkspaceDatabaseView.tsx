@@ -483,7 +483,12 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [inspecting, setInspecting] = useState<{ column: string; value: unknown } | null>(null);
   const [editingRow, setEditingRow] = useState<number | null>(null);
-  useEffect(() => { setSelected(new Set()); setCopyState("idle"); setEditingRow(null); }, [result]);
+  // Index-keyed staging is meaningless against a new row set — drop it so a
+  // late query response can't retarget edits/deletes onto different rows.
+  useEffect(() => {
+    setSelected(new Set()); setCopyState("idle");
+    setEdits({}); setDeleted(new Set()); setEditing(null); setEditingRow(null);
+  }, [result]);
 
   const rows = result?.rows ?? [];
   const visibleCols = cols.filter((column) => !hiddenColumns.has(column));
