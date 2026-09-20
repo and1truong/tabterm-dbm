@@ -51,6 +51,9 @@ export function rowsToCsv(columns: string[], rows: Record<string, unknown>[]): s
 export function coerceCellValue(raw: string, type: string, original?: unknown): unknown {
   const value = raw.trim();
   if (value.toUpperCase() === "NULL") return null;
+  // A blank input in a numeric/boolean column is a clear-to-NULL, not the
+  // string "" — SQLite would otherwise happily store TEXT in the slot.
+  if (value === "" && /\b(INT|INTEGER|BIGINT|SMALLINT|INT8|SERIAL|BIGSERIAL|REAL|FLOAT|DOUBLE|DECIMAL|NUMERIC|BOOL|BOOLEAN)\b/i.test(type)) return null;
   if (/\b(DECIMAL|NUMERIC)\b/i.test(type) && value !== "") return value;
   if (/\b(INT|INTEGER|BIGINT|SMALLINT|INT8|SERIAL|BIGSERIAL)\b/i.test(type) && /^[-+]?\d+$/.test(value)) {
     const number = Number(value);

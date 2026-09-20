@@ -73,6 +73,15 @@ describe("staged row changes", () => {
     expect(coerceCellValue("43", "", "x")).toBe("43");
   });
 
+  test("treats blank input in numeric and boolean columns as NULL", () => {
+    expect(coerceCellValue("", "INTEGER")).toBeNull();
+    expect(coerceCellValue("  ", "REAL")).toBeNull();
+    expect(coerceCellValue("", "NUMERIC(10,2)")).toBeNull();
+    expect(coerceCellValue("", "BOOLEAN")).toBeNull();
+    expect(coerceCellValue("", "text")).toBe("");
+    expect(coerceCellValue("", "")).toBe("");
+  });
+
   test("uses a non-null unique key when a table has no primary key", () => {
     const uniqueTable: DbTable = {
       name: "accounts", type: "table", rowCount: -1, ddl: "", uniqueKeys: [["email"]],
