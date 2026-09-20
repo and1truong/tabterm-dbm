@@ -672,7 +672,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                   const isNull = value === null || value === undefined;
                   const isNum = typeof value === "number";
                   const column = table.columns.find((candidate) => candidate.name === c);
-                  const canEditCell = canEditRows && !column?.generated && (v == null || typeof v !== "object");
+                  const canEditCell = canEditRows && !column?.generated && !column?.identity && (v == null || typeof v !== "object");
                   return (
                     <td key={c} onDoubleClick={() => canEditCell && !deleted.has(i) && setEditing(stagedKey)}
                       className={"px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)] align-top " + (isNum ? "text-right " : "") + (stagedKey in edits ? "bg-[var(--accent)]/10 " : "") + (canEditCell ? "cursor-text" : "")}>
@@ -778,7 +778,7 @@ function EditRowModal({ table, row, rowNumber, initial, onClose, onStage }: {
   onStage: (staged: Record<string, unknown>) => void;
 }) {
   const editable = (column: DbColumn) =>
-    !column.generated && (row[column.name] == null || typeof row[column.name] !== "object");
+    !column.generated && !column.identity && (row[column.name] == null || typeof row[column.name] !== "object");
   const seedFor = (column: DbColumn) => {
     const value = initial[column.name];
     return value === null || value === undefined ? "NULL" : displayDbValue(value);

@@ -71,11 +71,12 @@ async function exercise(width: number) {
         { name: "id", type: "integer", notNull: true, pk: true, fk: null },
         { name: "name", type: "text", notNull: true, pk: false, fk: null },
         { name: "computed", type: "integer", notNull: true, pk: false, fk: null, generated: true },
+        { name: "seq", type: "integer", notNull: true, pk: false, fk: null, identity: true },
       ],
     },
     source: { kind: "sqlite", path: "/tmp/smoke.sqlite" },
     writable: true,
-    columns: ["id", "name", "computed"],
+    columns: ["id", "name", "computed", "seq"],
     sorts: [],
     pageSize: 100,
     onSort: (column: string, additive: boolean) => events.push(`sort:${column}:${additive}`),
@@ -171,6 +172,8 @@ async function exercise(width: number) {
   if (!nameField || nameField.value !== "Ada") fail(`${width}px: edit-row modal is not pre-filled with the row's values`);
   const generatedField = byLabel("Edit field computed") as HTMLInputElement | null;
   if (!generatedField || !generatedField.disabled) fail(`${width}px: generated column is editable in the edit-row modal`);
+  const identityField = byLabel("Edit field seq") as HTMLInputElement | null;
+  if (!identityField || !identityField.disabled) fail(`${width}px: identity column is editable in the edit-row modal`);
   setInput(nameField, "Augusta");
   await settle();
   [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Stage changes")?.click();
