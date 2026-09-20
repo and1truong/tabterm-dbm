@@ -564,8 +564,11 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   };
   // Apply must send exactly what was reviewed — snapshot the change set at
   // review time so edits staged while the preview request is in flight can't
-  // ride along unreviewed. `reviewing` blocks new staging for the same window,
-  // and the generation check drops a preview that resolves after a revert.
+  // ride along unreviewed. Staging stays locked until the review window closes
+  // (revert/apply/close): the modal backdrop blocks pointer input only, not
+  // keyboard focus. The generation check drops a preview that resolves after
+  // a revert.
+  const stagingLocked = reviewing || preview !== null;
   const review = async () => {
     setMutationError(null);
     const staged = changes;
@@ -626,20 +629,20 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
           </div>
         )}
         <span className="h-5 w-px bg-[var(--border)]" />
-        <button onClick={() => setInsertOpen(true)} disabled={!canInsert || reviewing}
+        <button onClick={() => setInsertOpen(true)} disabled={!canInsert || stagingLocked}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
           Add row
         </button>
-        <button onClick={() => setImportOpen(true)} disabled={!canInsert || dirty || reviewing}
+        <button onClick={() => setImportOpen(true)} disabled={!canInsert || dirty || stagingLocked}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
           Import CSV
         </button>
         <button onClick={() => { setDeleted(new Set([...deleted, ...selected])); setSelected(new Set()); }}
-          disabled={!canEditRows || selected.size === 0 || reviewing}
+          disabled={!canEditRows || selected.size === 0 || stagingLocked}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--red)] hover:bg-[var(--hover)] disabled:opacity-40">
           Delete selected
         </button>
-        <button onClick={() => void review()} disabled={!dirty}
+        <button onClick={() => void review()} disabled={!dirty || insertOpen || importOpen || editingRow !== null}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--accent)] hover:bg-[var(--hover)] disabled:opacity-40">
           Review {changes.length || ""} change{changes.length === 1 ? "" : "s"}
         </button>
@@ -693,7 +696,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                 {canEditRows && (
                   <td className="w-8 px-1 py-1 border-b border-[var(--border)]">
                     <button aria-label={`Edit row ${result.offset + i + 1}`} title="Edit this row"
-                      disabled={deleted.has(i) || reviewing} onClick={() => setEditingRow(i)}
+                      disabled={deleted.has(i) || stagingLocked} onClick={() => setEditingRow(i)}
                       className="p-1 rounded text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--accent)] disabled:opacity-30">
                       <Pencil size={12} />
                     </button>
@@ -708,7 +711,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                   const column = table.columns.find((candidate) => candidate.name === c);
                   const canEditCell = canEditRows && !column?.generated && !column?.identity && (v == null || typeof v !== "object");
                   return (
-                    <td key={c} onDoubleClick={() => canEditCell && !deleted.has(i) && !reviewing && setEditing(stagedKey)}
+                    <td key={c} onDoubleClick={() => canEditCell && !deleted.has(i) && !stagingLocked && setEditing(stagedKey)}
                       className={"px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)] align-top " + (isNum ? "text-right " : "") + (stagedKey in edits ? "bg-[var(--accent)]/10 " : "") + (canEditCell ? "cursor-text" : "")}>
                       {editing === stagedKey ? (
                         <input autoFocus aria-label={`Edit row ${result.offset + i + 1} ${c}`}
