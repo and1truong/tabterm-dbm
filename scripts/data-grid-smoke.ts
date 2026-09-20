@@ -188,6 +188,11 @@ async function exercise(width: number) {
   editRow.click();
   await settle();
   if (!container.querySelector('[role="dialog"][aria-label="Edit row"]')) fail(`${width}px: edit-row modal is not visible`);
+  // The backdrop blocks pointer input only — the staging lock must keep the
+  // toolbar from staging behind (or onto) the open modal.
+  if (!byLabel("Edit row 2")?.hasAttribute("disabled")) fail(`${width}px: row edit was not blocked while the edit modal was open`);
+  const addRowBehindModal = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Add row");
+  if (addRowBehindModal && !addRowBehindModal.hasAttribute("disabled")) fail(`${width}px: add row was not blocked while the edit modal was open`);
   const nameField = byLabel("Edit field name") as HTMLInputElement | null;
   if (!nameField || nameField.value !== "Ada") fail(`${width}px: edit-row modal is not pre-filled with the row's values`);
   const generatedField = byLabel("Edit field computed") as HTMLInputElement | null;
@@ -360,7 +365,64 @@ async function exerciseNoIdentity() {
   container.remove();
 }
 
+async function exerciseProtoColumn() {
+  const React = (await import("react")).default;
+  const { createRoot } = await import("react-dom/client");
+  const { flushSync } = await import("react-dom");
+  const { DataGrid } = await import("../src/WorkspaceDatabaseView.tsx");
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const byLabel = (label: string) => container.querySelector(`[aria-label="${label}"]`) as HTMLElement | null;
+  flushSync(() => root.render(React.createElement(DataGrid, {
+    table: {
+      name: "odd", type: "table", rowCount: -1, ddl: "",
+      columns: [
+        { name: "id", type: "integer", notNull: true, pk: true, fk: null },
+        { name: "__proto__", type: "text", notNull: false, pk: false, fk: null },
+      ],
+    },
+    source: { kind: "sqlite", path: "/tmp/smoke.sqlite" },
+    writable: true,
+    columns: ["id", "__proto__"],
+    result: {
+      columns: ["id", "__proto__"],
+      // JSON.parse — a "__proto__" key in an object literal would set the
+      // row's prototype instead of creating an own property.
+      rows: [JSON.parse('{"id":1,"__proto__":"keep"}')],
+      ms: 0.5,
+      hasMore: false,
+      offset: 0,
+    },
+    sorts: [],
+    pageSize: 100,
+    onSort: () => {},
+    onPrevious: () => {},
+    onNext: () => {},
+    onPageSize: () => {},
+    onDirtyChange: () => {},
+    onApplied: () => {},
+    onExportAll: async () => ({ columns: [], rows: [] }),
+  })));
+
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Add row")?.click();
+  await settle();
+  const protoField = byLabel("New __proto__") as HTMLInputElement | null;
+  if (!protoField) fail("add-row modal is missing the __proto__ column field");
+  if (protoField.value !== "") fail(`__proto__ field prefilled with ${JSON.stringify(protoField.value)} instead of blank`);
+  setInput(protoField, "x");
+  await settle();
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Stage row")?.click();
+  await settle();
+  if (![...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail("staging a row with a __proto__ column did not work");
+
+  flushSync(() => root.unmount());
+  container.remove();
+}
+
 await exercise(1280);
 await exercise(480);
 await exerciseNoIdentity();
+await exerciseProtoColumn();
 console.log("PASS: data grid browse/edit/review/apply works at 1280px and 480px");

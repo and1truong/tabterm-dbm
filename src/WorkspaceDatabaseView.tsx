@@ -208,7 +208,14 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
     if (pane !== "data" || !activeSource || !activeTable) return;
     const controller = new AbortController();
     const t = setTimeout(() => { void loadRows(controller.signal); }, 150);
-    return () => { clearTimeout(t); controller.abort(); };
+    return () => {
+      clearTimeout(t);
+      controller.abort();
+      // Invalidate in-flight loads the moment the query context changes —
+      // otherwise a superseded response resolving inside the debounce window
+      // is accepted and its result wipes index-keyed staging.
+      loadRef.current++;
+    };
   }, [pane, sourceKey, activeTable, filterModel, sorts, page, pageSize, loadRows]);
 
   // auto-pick the first discovered sqlite db (Postgres requires explicit connect)
@@ -566,9 +573,11 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   // review time so edits staged while the preview request is in flight can't
   // ride along unreviewed. Staging stays locked until the review window closes
   // (revert/apply/close): the modal backdrop blocks pointer input only, not
-  // keyboard focus. The generation check drops a preview that resolves after
-  // a revert.
-  const stagingLocked = reviewing || preview !== null;
+  // keyboard focus — so any open staging modal must hold the lock too, or
+  // Tab can still reach the toolbar and stack a second modal or delete the
+  // row being edited. The generation check drops a preview that resolves
+  // after a revert.
+  const stagingLocked = reviewing || preview !== null || editingRow !== null || insertOpen || importOpen;
   const review = async () => {
     setMutationError(null);
     const staged = changes;
@@ -876,8 +885,11 @@ function InsertRowModal({ table, onClose, onAdd }: {
   onClose: () => void;
   onAdd: (values: Record<string, unknown>) => void;
 }) {
-  const [values, setValues] = useState<Record<string, string>>({});
   const writableColumns = table.columns.filter((column) => !column.generated && !column.identity);
+  // Seed every writable column as an own property so a column named e.g.
+  // "__proto__" reads "" rather than inheriting an Object.prototype member.
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(writableColumns.map((column) => [column.name, ""])));
   const submit = () => {
     const row: [string, unknown][] = [];
     for (const column of writableColumns) {
