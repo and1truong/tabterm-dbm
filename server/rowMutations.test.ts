@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { compileRowChange, compileRowChanges, toPostgresMutationSql } from "./rowMutations.ts";
 import { DbError } from "../shared.ts";
+import type { RowChange } from "../shared.ts";
 
 describe("structured row mutations", () => {
   test("compiles an optimistic update with a qualified relation", () => {
@@ -67,5 +68,8 @@ describe("structured row mutations", () => {
     expect(() => compileRowChange({
       kind: "delete", table: { name: "users" }, key: {}, expected: {},
     })).toThrow(DbError);
+    expect(() => compileRowChange({
+      kind: "remove", table: { name: "users" }, key: { id: 1 }, expected: { id: 1 },
+    } as unknown as RowChange)).toThrow(DbError);
   });
 });

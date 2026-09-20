@@ -55,8 +55,11 @@ export function compileRowChange(change: RowChange): RowChangeStatement {
       params,
     };
   }
-  const where = whereSql(change, params);
-  return { kind: change.kind, sql: `DELETE FROM ${relation} WHERE ${where}`, params };
+  if (change.kind === "delete") {
+    const where = whereSql(change, params);
+    return { kind: change.kind, sql: `DELETE FROM ${relation} WHERE ${where}`, params };
+  }
+  throw new DbError("invalid_change", `unknown row change kind "${(change as RowChange).kind}"`);
 }
 
 export function compileRowChanges(changes: RowChange[]): RowChangeStatement[] {
