@@ -280,7 +280,9 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
                   </div>
                 </>
               )}
-              <DataGrid table={activeTbl} source={activeSource} writable={writable}
+              {/* Remount on table/source switch so per-table grid state
+                  (hidden columns, staged edits, open modals) can't leak across. */}
+              <DataGrid key={`${sourceKey}:${activeTable}`} table={activeTbl} source={activeSource} writable={writable}
                 columns={activeTbl.columns.map((c) => c.name)} result={result}
                 sorts={sorts} pageSize={pageSize}
                 onSort={(column, additive) => { setSorts((current) => toggleSort(current, column, additive)); setPage(0); }}
