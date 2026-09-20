@@ -79,20 +79,21 @@ function GroupView({ group, cols, dialect, depth, onChange, onRemove }: {
 function RuleView({ rule, cols, dialect, onChange, onRemove }: {
   rule: FilterRule; cols: DbColumn[]; dialect: DbDialect; onChange: (r: FilterRule) => void; onRemove: () => void;
 }) {
-  const col = cols[rule.col];
+  const col = cols.find((candidate) => candidate.name === rule.col);
   const ops = opsFor(col?.type ?? "TEXT", dialect);
   const needsValue = opNeedsValue(rule.op);
   // Changing the column resets the op to that type's default and clears the value,
   // so a stale numeric op never runs against a text column (or vice versa).
-  const setCol = (idx: number) =>
-    onChange({ ...rule, col: idx, op: defaultOp(cols[idx]?.type ?? "TEXT"), value: "" });
+  const setCol = (name: string) =>
+    onChange({ ...rule, col: name, op: defaultOp(cols.find((c) => c.name === name)?.type ?? "TEXT"), value: "" });
 
   return (
     <div className="flex items-center gap-1.5 text-xs">
-      <select value={rule.col} onChange={(e) => setCol(Number(e.target.value))}
+      <select value={rule.col} onChange={(e) => setCol(e.target.value)}
         className="mono rounded border border-[var(--border-2)] bg-[var(--panel)] px-1.5 py-0.5 text-[var(--text)] max-w-[40%]">
-        {cols.map((c, i) => (
-          <option key={c.name} value={i}>{c.name}{c.type ? ` (${c.type})` : ""}</option>
+        {!col && <option value={rule.col}>{rule.col} (missing)</option>}
+        {cols.map((c) => (
+          <option key={c.name} value={c.name}>{c.name}{c.type ? ` (${c.type})` : ""}</option>
         ))}
       </select>
       <select value={rule.op} onChange={(e) => onChange({ ...rule, op: e.target.value as FilterOp })}
