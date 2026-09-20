@@ -139,20 +139,23 @@ export function readSchema(pathRaw: string): DbSchema {
           ddl: o.sql ?? "",
         });
       } else if (o.type === "index") {
-        const flags = db.query<{ unique: number; origin: string }, [string, string]>("SELECT `unique`, origin FROM pragma_index_list(?) WHERE name = ?").get(o.tbl_name, o.name);
+        const flags = db.query<{ unique: number; origin: string; partial: number }, [string, string]>("SELECT `unique`, origin, partial FROM pragma_index_list(?) WHERE name = ?").get(o.tbl_name, o.name);
         const columns = db.query<{ name: string }, []>(`PRAGMA index_info(${quoteIdent(o.name)})`).all().map((column) => column.name);
         indexes.push({ name: o.name, table: o.tbl_name, unique: flags?.unique === 1, columns, sql: o.sql ?? "" });
-        if (flags?.unique === 1 && columns.length) {
+        // A partial unique index doesn't cover every row, and an expression
+        // index has NULL column names (index_info), so neither can serve as
+        // a row identity even though it is unique over its subset.
+        if (flags?.unique === 1 && !flags.partial && columns.length && columns.every((name) => name != null)) {
           const table = tables.find((candidate) => candidate.name === o.tbl_name);
           if (table) table.uniqueKeys = [...(table.uniqueKeys ?? []), columns];
         }
       } else if (o.type === "trigger") triggers.push({ name: o.name, table: o.tbl_name, sql: o.sql ?? "" });
     }
     for (const table of tables.filter((candidate) => candidate.type === "table")) {
-      const listed = db.query<{ name: string; unique: number }, []>(`PRAGMA index_list(${quoteIdent(table.name)})`).all();
+      const listed = db.query<{ name: string; unique: number; partial: number }, []>(`PRAGMA index_list(${quoteIdent(table.name)})`).all();
       for (const item of listed) {
         const columns = db.query<{ name: string }, []>(`PRAGMA index_info(${quoteIdent(item.name)})`).all().map((column) => column.name);
-        if (item.unique === 1 && columns.length && !(table.uniqueKeys ?? []).some((key) => key.join("\0") === columns.join("\0"))) {
+        if (item.unique === 1 && !item.partial && columns.length && columns.every((name) => name != null) && !(table.uniqueKeys ?? []).some((key) => key.join("\0") === columns.join("\0"))) {
           table.uniqueKeys = [...(table.uniqueKeys ?? []), columns];
         }
         if (!indexes.some((index) => index.name === item.name)) indexes.push({ name: item.name, table: table.name, unique: item.unique === 1, columns, sql: "" });

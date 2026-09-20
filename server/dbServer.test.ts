@@ -91,6 +91,25 @@ describe("readSchema", () => {
     expect(() => readSchema(join(dir, "ghost.db"))).toThrow(DbError);
   });
 
+  test("excludes partial and expression unique indexes from row identity keys", () => {
+    const path = join(dir, "partial.db");
+    const db = new Database(path, { create: true });
+    db.exec(`CREATE TABLE docs (id INTEGER PRIMARY KEY, slug TEXT NOT NULL, status TEXT NOT NULL)`);
+    db.exec(`CREATE UNIQUE INDEX docs_slug_active ON docs (slug) WHERE status = 'active'`);
+    // Expression columns report a NULL name from index_info — the remaining
+    // key columns alone are not unique, so the index must not qualify.
+    db.exec(`CREATE UNIQUE INDEX docs_slug_expr ON docs (slug, lower(status))`);
+    db.exec(`CREATE UNIQUE INDEX docs_id_slug ON docs (id, slug)`);
+    db.close();
+    const docs = readSchema(path).tables.find((t) => t.name === "docs")!;
+    // Only the covering unique index qualifies; the partial and expression
+    // ones can't identify every row.
+    expect(docs.uniqueKeys).toEqual([["id", "slug"]]);
+    // And no bogus `UNIQUE ()`/`UNIQUE (slug, )` constraint is synthesized.
+    const s = readSchema(path);
+    expect(s.constraints?.filter((c) => c.table === "docs" && c.type === "UNIQUE").map((c) => c.columns)).toEqual([["id", "slug"]]);
+  });
+
   test("reports SQLite generated columns from table_xinfo", () => {
     const path = join(dir, "generated.db");
     const db = new Database(path, { create: true });
