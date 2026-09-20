@@ -76,6 +76,12 @@ describe("compileGroup", () => {
     expect(compileGroup(regex, cols, "sqlite").where).toBe('("name" GLOB ?)');
     expect(compileGroup(glob, cols, "postgres").where).toBe('("name" ~ ?)');
   });
+
+  test("a rule on a dropped column never matches instead of crashing", () => {
+    const m: FilterModel = { id: "g", combinator: "AND" as const, rules: [{ ...newRule(cols), col: 9, op: "equals", value: "1" }] };
+    expect(compileGroup(m, cols).where).toBe("(1 = 0)");
+    expect(previewWhere(m, cols)).toBe("(1 = 0)");
+  });
 });
 
 describe("previewWhere", () => {

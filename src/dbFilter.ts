@@ -84,6 +84,9 @@ function numOrThrow(v: string): number {
 
 function compileRuleExec(r: FilterRule, cols: DbColumn[], params: unknown[], dialect: DbDialect): string {
   const col = cols[r.col];
+  // A rule can outlive its column (schema reload after DROP COLUMN). Never
+  // match — and never silently retarget whatever now sits at that index.
+  if (!col) return "1 = 0";
   const name = ident(col.name);
   const numeric = isNumericType(col.type);
   switch (r.op) {
@@ -128,6 +131,7 @@ function sqlLit(value: string, numeric: boolean): string {
 }
 function compileRulePreview(r: FilterRule, cols: DbColumn[], dialect: DbDialect): string {
   const col = cols[r.col];
+  if (!col) return "1 = 0";
   const name = ident(col.name);
   const numeric = isNumericType(col.type);
   switch (r.op) {
