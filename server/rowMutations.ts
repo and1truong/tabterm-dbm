@@ -65,10 +65,31 @@ export function compileRowChanges(changes: RowChange[]): RowChangeStatement[] {
   return changes.map(compileRowChange);
 }
 
+// Compiled statements only contain double-quoted identifiers — every value is
+// a bound parameter — so `?` inside a quoted identifier (a legal Postgres name)
+// must not be mistaken for a placeholder.
 export function toPostgresMutationSql(sql: string): string {
   let parameter = 0;
-  return sql.replace(/ IS \?|\?/g, (token) => {
-    const placeholder = `$${++parameter}`;
-    return token === "?" ? placeholder : ` IS NOT DISTINCT FROM ${placeholder}`;
-  });
+  let out = "";
+  let inIdentifier = false;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (inIdentifier) {
+      out += ch;
+      // A doubled quote is an escaped quote, not a terminator.
+      if (ch === '"' && sql[i + 1] === '"') out += sql[++i];
+      else if (ch === '"') inIdentifier = false;
+      continue;
+    }
+    if (ch === '"') { inIdentifier = true; out += ch; continue; }
+    if (ch === "?") {
+      const placeholder = `$${++parameter}`;
+      out = out.endsWith(" IS ")
+        ? `${out.slice(0, -4)} IS NOT DISTINCT FROM ${placeholder}`
+        : out + placeholder;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }

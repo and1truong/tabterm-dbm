@@ -36,6 +36,20 @@ describe("structured row mutations", () => {
     });
   });
 
+  test("leaves question marks inside quoted identifiers untouched", () => {
+    const statement = compileRowChange({
+      kind: "update",
+      table: { name: "t" },
+      key: { id: 1 },
+      expected: { id: 1 },
+      values: { "score?": 5, 'why "not"': 6 },
+    });
+    expect(statement.sql).toBe(`UPDATE "t" SET "score?" = ?, "why ""not""" = ? WHERE "id" IS ?`);
+    expect(toPostgresMutationSql(statement.sql)).toBe(
+      `UPDATE "t" SET "score?" = $1, "why ""not""" = $2 WHERE "id" IS NOT DISTINCT FROM $3`,
+    );
+  });
+
   test("rejects unsafe unidentifiable or empty batches", () => {
     expect(() => compileRowChanges([])).toThrow(DbError);
     expect(() => compileRowChange({
