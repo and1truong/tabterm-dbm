@@ -157,8 +157,17 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   // rewrites `?`→`$n` for Postgres).
   const activeTbl: DbTable | undefined = schema?.tables.find((t) => tableKey(t) === activeTable);
   const queryRef = useRef<{ sql: string; params: unknown[]; limit: number; offset: number } | null>(null);
+  let filterError: string | null = null;
   if (activeSource && activeTable && activeTbl) {
-    const { where, params } = compileGroup(filterModel, activeTbl.columns, activeSource.kind);
+    let where = "", params: unknown[] = [];
+    try {
+      ({ where, params } = compileGroup(filterModel, activeTbl.columns, activeSource.kind));
+    } catch (error) {
+      // An unparseable rule value (e.g. a non-numeric in a numeric op) must not
+      // crash render — fail closed and surface the reason instead.
+      where = "1 = 0";
+      filterError = error instanceof Error ? error.message : String(error);
+    }
     const base = `SELECT * FROM ${tableSql(activeTbl)}`;
     const sql = (where ? `${base} WHERE ${where}` : base) + orderBySql(sorts);
     queryRef.current = { sql, params, limit: pageSize, offset: page * pageSize };
@@ -256,6 +265,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
         <ObjectTree schema={schema} activeTable={activeTable} onSelect={(table) => navigate(table, pane)} locked={dataDirty} />
         <div className="flex flex-col min-w-0">
           {err && <Notice variant="error" layout="inline" className="px-3 py-2 text-xs">{err}</Notice>}
+          {filterError && <Notice variant="error" layout="inline" className="px-3 py-2 text-xs">Filter: {filterError}</Notice>}
           {pane === "data" && activeTbl && activeSource && (
             <>
               {filterOpen && !dataDirty && (
