@@ -50,6 +50,18 @@ describe("structured row mutations", () => {
     );
   });
 
+  test("keeps expected predicates for columns shadowing Object.prototype names", () => {
+    const statement = compileRowChange({
+      kind: "update",
+      table: { name: "docs" },
+      key: { id: 1 },
+      expected: { id: 1, toString: "x", body: "b" },
+      values: { body: "c" },
+    });
+    expect(statement.sql).toBe(`UPDATE "docs" SET "body" = ? WHERE "id" IS ? AND "toString" IS ? AND "body" IS ?`);
+    expect(statement.params).toEqual(["c", 1, "x", "b"]);
+  });
+
   test("rejects unsafe unidentifiable or empty batches", () => {
     expect(() => compileRowChanges([])).toThrow(DbError);
     expect(() => compileRowChange({

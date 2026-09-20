@@ -23,7 +23,7 @@ function entries(values: Record<string, unknown>, label: string): [string, unkno
 
 function whereSql(change: Extract<RowChange, { kind: "update" | "delete" }>, params: unknown[]): string {
   const key = entries(change.key, "row key");
-  const expected = Object.entries(change.expected).filter(([column]) => !(column in change.key));
+  const expected = Object.entries(change.expected).filter(([column]) => !Object.prototype.hasOwnProperty.call(change.key, column));
   return [...key, ...expected].map(([column, value]) => {
     params.push(decodeDbValue(value));
     // `IS` is SQLite's null-safe equality and Postgres dispatch rewrites this
