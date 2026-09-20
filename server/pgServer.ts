@@ -640,8 +640,9 @@ export async function runPgRowChanges(
   url: string,
   changes: RowChange[],
   signal?: AbortSignal,
-  timeoutMs = 30_000,
+  timeoutRaw?: number,
 ): Promise<RowMutationResult> {
+  const timeoutMs = Math.min(Math.max(Math.floor(timeoutRaw ?? 30_000), 1_000), 300_000);
   const statements = compileRowChanges(changes);
   const db = open(url);
   const connection = await db.reserve();
