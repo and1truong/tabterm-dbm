@@ -637,7 +637,14 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
           Import CSV
         </button>
-        <button onClick={() => { setDeleted(new Set([...deleted, ...selected])); setSelected(new Set()); }}
+        <button onClick={() => {
+            setDeleted(new Set([...deleted, ...selected]));
+            // Delete wins: drop the doomed rows' staged edits so they can't
+            // render as pending changes the review will never list.
+            setEdits((current) => Object.fromEntries(Object.entries(current)
+              .filter(([key]) => !selected.has(Number(key.slice(0, key.indexOf("\u0000")))))));
+            setSelected(new Set());
+          }}
           disabled={!canEditRows || selected.size === 0 || stagingLocked}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--red)] hover:bg-[var(--hover)] disabled:opacity-40">
           Delete selected
