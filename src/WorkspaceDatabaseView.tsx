@@ -9,7 +9,7 @@ import type { FilterModel } from "./dbFilter.ts";
 import { DatabaseOpenModal } from "./DatabaseOpenModal.tsx";
 import { DatabaseFilterBuilder } from "./DatabaseFilterBuilder.tsx";
 import { DatabaseCreateViewModal } from "./DatabaseCreateViewModal.tsx";
-import type { DatabaseInsights, DbFile, DbSchema, DbTable, DbColumn, QueryResult, RowChangeStatement } from "../shared.ts";
+import type { DatabaseInsights, DbFile, DbSchema, DbTable, DbColumn, QueryResult, RowChange, RowChangeStatement } from "../shared.ts";
 import { tableKey, tableLabel, tableSql } from "./sqlIdentifiers.ts";
 import { buildRowChanges, coerceCellValue, editKey, orderBySql, rowsToCsv, toggleSort } from "./dataGrid.ts";
 import type { SortSpec } from "./dataGrid.ts";
@@ -473,7 +473,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const [inserts, setInserts] = useState<Record<string, unknown>[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [insertOpen, setInsertOpen] = useState(false);
-  const [preview, setPreview] = useState<RowChangeStatement[] | null>(null);
+  const [preview, setPreview] = useState<{ staged: RowChange[]; statements: RowChangeStatement[] } | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
   const [transferBusy, setTransferBusy] = useState(false);
@@ -542,15 +542,20 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
     setEdits({}); setDeleted(new Set()); setInserts([]); setEditing(null);
     setEditingRow(null); setPreview(null); setMutationError(null);
   };
+  // Apply must send exactly what was reviewed — snapshot the change set at
+  // review time so edits staged while the preview request is in flight can't
+  // ride along unreviewed.
   const review = async () => {
     setMutationError(null);
-    try { setPreview((await dbApi.rows.preview(changes)).statements); }
+    const staged = changes;
+    try { setPreview({ staged, statements: (await dbApi.rows.preview(staged)).statements }); }
     catch (error) { setMutationError(String(error)); }
   };
   const apply = async () => {
+    if (!preview) return;
     setApplying(true); setMutationError(null);
     try {
-      await dbApi.rows.apply(source, changes);
+      await dbApi.rows.apply(source, preview.staged);
       revert();
       onApplied();
     } catch (error) { setMutationError(String(error)); }
@@ -741,7 +746,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
         }} />
       )}
       {preview && (
-        <RowChangesModal statements={preview} applying={applying} error={mutationError}
+        <RowChangesModal statements={preview.statements} applying={applying} error={mutationError}
           onClose={() => setPreview(null)} onApply={() => void apply()} />
       )}
       {inspecting && <ValueInspector column={inspecting.column} value={inspecting.value} onClose={() => setInspecting(null)} />}

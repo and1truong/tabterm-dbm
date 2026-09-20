@@ -18,12 +18,21 @@ Object.defineProperty((globalThis as any).navigator, "clipboard", {
   value: { writeText: async (value: string) => { clipboard = value; } },
   configurable: true,
 });
-(globalThis as any).fetch = async (input: string | URL | Request) => {
+let holdPreview = false;
+const previewResolvers: (() => void)[] = [];
+const flushPreview = () => { holdPreview = false; previewResolvers.splice(0).forEach((resolve) => resolve()); };
+let lastApplyBody: { changes?: unknown[] } | null = null;
+(globalThis as any).fetch = async (input: string | URL | Request, init?: RequestInit) => {
   const url = String(input);
   if (url.endsWith("/rows/preview")) {
-    return Response.json({ statements: [{ kind: "update", sql: `UPDATE "users" SET "name" = ? WHERE "id" IS ?`, params: ["Augusta", 1] }] });
+    const respond = () => Response.json({ statements: [{ kind: "update", sql: `UPDATE "users" SET "name" = ? WHERE "id" IS ?`, params: ["Augusta", 1] }] });
+    if (holdPreview) return new Promise<Response>((resolve) => previewResolvers.push(() => resolve(respond())));
+    return respond();
   }
-  if (url.endsWith("/rows/apply")) return Response.json({ applied: 1, rowsAffected: 1, ms: 1 });
+  if (url.endsWith("/rows/apply")) {
+    lastApplyBody = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    return Response.json({ applied: 1, rowsAffected: 1, ms: 1 });
+  }
   return Response.json({ error: "unexpected smoke request" }, { status: 500 });
 };
 
@@ -245,6 +254,38 @@ async function exercise(width: number) {
   render({ ...baseResult, rows: [...baseResult.rows].reverse() });
   await settle();
   if ([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: staged edit survived a result replacement`);
+
+  // Apply must send exactly the reviewed change set — edits staged while the
+  // preview request is still in flight must not ride along unreviewed.
+  render(baseResult);
+  await settle();
+  holdPreview = true;
+  [...container.querySelectorAll("td")].find((cell) => cell.textContent?.trim() === "Ada")
+    ?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  const snapshotEditor = byLabel("Edit row 1 name") as HTMLInputElement | null;
+  if (!snapshotEditor) fail(`${width}px: cell editor did not open for the apply-snapshot check`);
+  snapshotEditor.value = "Augusta";
+  snapshotEditor.dispatchEvent(new Event("focusout", { bubbles: true }));
+  await settle();
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Review 1 change"))?.click();
+  await settle();
+  if (container.querySelector('[role="dialog"][aria-label="Review row changes"]')) fail(`${width}px: review modal opened before its preview resolved`);
+  const idCell = container.querySelectorAll("tbody tr")[0]?.querySelectorAll("td")[2] as HTMLElement | undefined;
+  idCell?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  const idEditor = byLabel("Edit row 1 id") as HTMLInputElement | null;
+  if (!idEditor) fail(`${width}px: second edit did not open while the preview was in flight`);
+  idEditor.value = "9";
+  idEditor.dispatchEvent(new Event("focusout", { bubbles: true }));
+  await settle();
+  flushPreview();
+  await settle();
+  await settle();
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Apply transaction")?.click();
+  await settle();
+  await settle();
+  if (!lastApplyBody || lastApplyBody.changes?.length !== 1) fail(`${width}px: apply sent ${lastApplyBody?.changes?.length ?? "no"} changes instead of the reviewed one`);
 
   flushSync(() => root.unmount());
   container.remove();
