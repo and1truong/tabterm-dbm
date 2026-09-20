@@ -55,9 +55,16 @@ export function newGroup(): FilterGroup {
   return { id: newId(), combinator: "AND", rules: [] };
 }
 
+const NUMERIC_TOKENS = new Set([
+  "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT",
+  "INT2", "INT4", "INT8", "SERIAL", "BIGSERIAL", "SMALLSERIAL",
+  "REAL", "FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DEC", "DECIMAL",
+  "NUM", "NUMERIC", "NUMBER", "MONEY", "OID",
+]);
 export function isNumericType(t: string): boolean {
-  const u = t.toUpperCase();
-  return u.includes("INT") || u.includes("REAL") || u.includes("FLOA") || u.includes("NUM") || u.includes("DOUBLE");
+  // Token match, not substring: "DECIMAL" contains no INT/REAL/NUM substring,
+  // and "POINT" must not classify as numeric just because it contains "INT".
+  return t.toUpperCase().split(/[^A-Z0-9]+/).some((token) => NUMERIC_TOKENS.has(token));
 }
 export function opsFor(type: string, dialect: DbDialect = "sqlite") {
   return isNumericType(type) ? NUM_OPS : dialect === "postgres" ? TEXT_OPS : SQLITE_TEXT_OPS;

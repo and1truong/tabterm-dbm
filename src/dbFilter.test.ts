@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { compileGroup, previewWhere, groupHasActive, newRule, defaultOp, opsFor, MAX_DEPTH, type FilterModel } from "./dbFilter.ts";
+import { compileGroup, previewWhere, groupHasActive, newRule, defaultOp, opsFor, isNumericType, MAX_DEPTH, type FilterModel } from "./dbFilter.ts";
 import type { DbColumn } from "../shared.ts";
 
 const cols: DbColumn[] = [
@@ -117,5 +117,13 @@ describe("depth + ops", () => {
   test("defaultOp differs by type", () => {
     expect(defaultOp("INTEGER")).toBe("equals");
     expect(defaultOp("TEXT")).toBe("contains");
+  });
+  test("isNumericType tokenizes declared types", () => {
+    for (const t of ["INTEGER", "DECIMAL(10,2)", "NUMERIC", "DOUBLE PRECISION", "money", "oid", "SERIAL", "FLOAT8", "UNSIGNED BIG INT"]) {
+      expect(isNumericType(t)).toBe(true);
+    }
+    for (const t of ["TEXT", "VARCHAR(20)", "POINT", "BOOLEAN", "TIMESTAMP", ""]) {
+      expect(isNumericType(t)).toBe(false);
+    }
   });
 });
