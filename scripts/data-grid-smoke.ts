@@ -62,12 +62,12 @@ async function exercise(width: number) {
   document.body.appendChild(container);
   const root = createRoot(container);
   const baseResult = {
-    columns: ["id", "name", "computed"],
+    columns: ["id", "name", "computed", "misc"],
     rows: [
-      { id: 1, name: "Ada", computed: 2 },
-      { id: 2, name: "G".repeat(200), computed: 4 },
-      { id: 3, name: { __tabtermDbmWire: { kind: "binary", base64: "AA==" } }, computed: 6 },
-      { id: 4, name: { ok: true }, computed: 8 },
+      { id: 1, name: "Ada", computed: 2, misc: 42 },
+      { id: 2, name: "G".repeat(200), computed: 4, misc: 7 },
+      { id: 3, name: { __tabtermDbmWire: { kind: "binary", base64: "AA==" } }, computed: 6, misc: 8 },
+      { id: 4, name: { ok: true }, computed: 8, misc: 9 },
     ],
     ms: 1.2,
     hasMore: true,
@@ -81,11 +81,12 @@ async function exercise(width: number) {
         { name: "name", type: "text", notNull: true, pk: false, fk: null },
         { name: "computed", type: "integer", notNull: true, pk: false, fk: null, generated: true },
         { name: "seq", type: "integer", notNull: true, pk: false, fk: null, identity: true },
+        { name: "misc", type: "", notNull: false, pk: false, fk: null },
       ],
     },
     source: { kind: "sqlite", path: "/tmp/smoke.sqlite" },
     writable: true,
-    columns: ["id", "name", "computed", "seq"],
+    columns: ["id", "name", "computed", "seq", "misc"],
     sorts: [],
     pageSize: 100,
     onSort: (column: string, additive: boolean) => events.push(`sort:${column}:${additive}`),
@@ -114,7 +115,7 @@ async function exercise(width: number) {
   if (!copy) fail(`${width}px: copy control is not visible`);
   copy.click();
   await settle();
-  if (clipboard !== "id,name,computed\n1,Ada,2") fail(`${width}px: selected-row CSV was ${JSON.stringify(clipboard)}`);
+  if (clipboard !== "id,name,computed,misc\n1,Ada,2,42") fail(`${width}px: selected-row CSV was ${JSON.stringify(clipboard)}`);
 
   const next = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Next");
   if (!next || next.hasAttribute("disabled")) fail(`${width}px: next page is not available`);
@@ -131,7 +132,7 @@ async function exercise(width: number) {
   if (!events.includes("size:50")) fail(`${width}px: page-size interaction did not fire`);
   if (!container.textContent?.includes("1–4+")) fail(`${width}px: result range is missing`);
 
-  const columnsButton = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Columns 3/3");
+  const columnsButton = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Columns 4/4");
   columnsButton?.click();
   await settle();
   if (!container.querySelectorAll('input[type="checkbox"]').length) fail(`${width}px: column chooser is missing`);
@@ -154,11 +155,21 @@ async function exercise(width: number) {
   await settle();
   if (byLabel("Edit row 4 name")) fail(`${width}px: object-valued cell incorrectly opened the text editor`);
 
-  const generatedCell = container.querySelectorAll("tbody tr")[0]?.querySelectorAll("td")[3] as HTMLElement | undefined;
+  const generatedCell = container.querySelectorAll("tbody tr")[0]?.querySelectorAll("td")[4] as HTMLElement | undefined;
   if (!generatedCell) fail(`${width}px: generated cell is missing`);
   generatedCell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
   await settle();
   if (byLabel("Edit row 1 computed")) fail(`${width}px: generated cell incorrectly opened the editor`);
+
+  const miscCell = [...container.querySelectorAll("td")].find((cell) => cell.textContent?.trim() === "42");
+  if (!miscCell) fail(`${width}px: untyped numeric cell is missing`);
+  miscCell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  const miscEditor = byLabel("Edit row 1 misc") as HTMLInputElement | null;
+  if (!miscEditor) fail(`${width}px: untyped cell did not open the editor`);
+  miscEditor.dispatchEvent(new Event("focusout", { bubbles: true }));
+  await settle();
+  if ([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: blur with no input staged a phantom type-changing edit`);
 
   const addRow = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Add row");
   addRow?.click();

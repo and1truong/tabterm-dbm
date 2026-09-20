@@ -48,7 +48,7 @@ export function rowsToCsv(columns: string[], rows: Record<string, unknown>[]): s
   ].join("\n");
 }
 
-export function coerceCellValue(raw: string, type: string): unknown {
+export function coerceCellValue(raw: string, type: string, original?: unknown): unknown {
   const value = raw.trim();
   if (value.toUpperCase() === "NULL") return null;
   if (/\b(DECIMAL|NUMERIC)\b/i.test(type) && value !== "") return value;
@@ -63,6 +63,12 @@ export function coerceCellValue(raw: string, type: string): unknown {
   if (/\b(BOOL|BOOLEAN)\b/i.test(type)) {
     if (/^(true|1)$/i.test(raw.trim())) return true;
     if (/^(false|0)$/i.test(raw.trim())) return false;
+  }
+  // Columns without a recognised declared type (untyped/BLOB-affinity SQLite)
+  // keep the current value's affinity: numeric input stays a number.
+  if (typeof original === "number" && value !== "" && !/\b(TEXT|CHAR|CLOB|VARCHAR)\b/i.test(type)) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
   }
   return raw;
 }

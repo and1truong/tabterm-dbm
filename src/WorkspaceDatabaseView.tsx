@@ -701,12 +701,14 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                             if (event.key === "Enter") event.currentTarget.blur();
                           }}
                           onBlur={(event) => {
-                            const nextValue = coerceCellValue(event.target.value, column?.type ?? "");
-                            setEdits((current) => {
-                              const next = { ...current };
-                              if (Object.is(nextValue, v)) delete next[stagedKey]; else next[stagedKey] = nextValue;
-                              return next;
-                            });
+                            if (event.target.value !== (isNull ? "NULL" : String(value))) {
+                              const nextValue = coerceCellValue(event.target.value, column?.type ?? "", v);
+                              setEdits((current) => {
+                                const next = { ...current };
+                                if (Object.is(nextValue, v)) delete next[stagedKey]; else next[stagedKey] = nextValue;
+                                return next;
+                              });
+                            }
                             setEditing(null);
                           }}
                           className="w-full min-w-16 bg-[var(--bg)] border border-[var(--accent)] rounded px-1 outline-none" />
@@ -807,7 +809,7 @@ function EditRowModal({ table, row, rowNumber, initial, onClose, onStage }: {
     for (const column of table.columns) {
       if (!editable(column)) continue;
       const raw = values[column.name] ?? "";
-      if (raw !== seedFor(column)) staged.push([column.name, coerceCellValue(raw, column.type)]);
+      if (raw !== seedFor(column)) staged.push([column.name, coerceCellValue(raw, column.type, row[column.name])]);
     }
     onStage(Object.fromEntries(staged));
   };

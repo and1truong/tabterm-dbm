@@ -65,6 +65,14 @@ describe("staged row changes", () => {
     expect(coerceCellValue("false", "BOOLEAN")).toBe(false);
   });
 
+  test("keeps numeric affinity on untyped columns holding numbers", () => {
+    expect(coerceCellValue("43", "", 42)).toBe(43);
+    expect(coerceCellValue("abc", "", 42)).toBe("abc");
+    expect(coerceCellValue("", "", 42)).toBe("");
+    expect(coerceCellValue("43", "text", 42)).toBe("43");
+    expect(coerceCellValue("43", "", "x")).toBe("43");
+  });
+
   test("uses a non-null unique key when a table has no primary key", () => {
     const uniqueTable: DbTable = {
       name: "accounts", type: "table", rowCount: -1, ddl: "", uniqueKeys: [["email"]],
