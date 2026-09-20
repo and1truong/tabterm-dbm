@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Database as DbIcon, RefreshCw, Plus, ChevronDown, Table2, Eye, Filter as FilterIcon, Search } from "lucide-react";
+import { Database as DbIcon, RefreshCw, Plus, ChevronDown, Table2, Eye, Filter as FilterIcon, Search, Pencil } from "lucide-react";
 import type { ClientHost } from "@tabterm/module-host/client";
 import Notice from "./Notice.tsx";
 import { dbApi } from "./dbApi.ts";
@@ -482,7 +482,8 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(() => new Set());
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [inspecting, setInspecting] = useState<{ column: string; value: unknown } | null>(null);
-  useEffect(() => { setSelected(new Set()); setCopyState("idle"); }, [result]);
+  const [editingRow, setEditingRow] = useState<number | null>(null);
+  useEffect(() => { setSelected(new Set()); setCopyState("idle"); setEditingRow(null); }, [result]);
 
   const rows = result?.rows ?? [];
   const visibleCols = cols.filter((column) => !hiddenColumns.has(column));
@@ -521,6 +522,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const identityColumns = primaryColumns.length ? primaryColumns : fallbackKey.map((name) => table.columns.find((column) => column.name === name)!);
   const canInsert = writable && table.type === "table";
   const canEditRows = canInsert && identityColumns.length > 0;
+  const colSpan = visibleCols.length + (canEditRows ? 2 : 1);
   const nonComparableColumns = source.kind === "postgres"
     ? new Set(table.columns.filter((column) => column.comparable === false).map((column) => column.name))
     : undefined;
@@ -533,7 +535,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
 
   const revert = () => {
     setEdits({}); setDeleted(new Set()); setInserts([]); setEditing(null);
-    setPreview(null); setMutationError(null);
+    setEditingRow(null); setPreview(null); setMutationError(null);
   };
   const review = async () => {
     setMutationError(null);
@@ -621,6 +623,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                 <input type="checkbox" aria-label="Select all rows" checked={allSelected}
                   onChange={(event) => setSelected(event.target.checked ? new Set(rows.map((_, i) => i)) : new Set())} />
               </th>
+              {canEditRows && <th className="w-8 border-b border-[var(--border)]" />}
               {visibleCols.map((c) => (
                 <th key={c} className="text-left font-semibold text-[var(--text)] border-b border-[var(--border)] whitespace-nowrap">
                   <button aria-label={`Sort by ${c}`} disabled={dirty} onClick={(event) => onSort(c, event.shiftKey)}
@@ -648,6 +651,15 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                       return next;
                     })} />
                 </td>
+                {canEditRows && (
+                  <td className="w-8 px-1 py-1 border-b border-[var(--border)]">
+                    <button aria-label={`Edit row ${result.offset + i + 1}`} title="Edit this row"
+                      disabled={deleted.has(i)} onClick={() => setEditingRow(i)}
+                      className="p-1 rounded text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--accent)] disabled:opacity-30">
+                      <Pencil size={12} />
+                    </button>
+                  </td>
+                )}
                 {visibleCols.map((c) => {
                   const v = (row as Record<string, unknown>)[c];
                   const stagedKey = editKey(i, c);
@@ -688,10 +700,10 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
               </tr>
             ))}
             {result && result.rows.length === 0 && (
-              <tr><td colSpan={visibleCols.length + 1} className="px-2 py-6 text-center text-[var(--faint)]">No rows.</td></tr>
+              <tr><td colSpan={colSpan} className="px-2 py-6 text-center text-[var(--faint)]">No rows.</td></tr>
             )}
             {!result && (
-              <tr><td colSpan={visibleCols.length + 1} className="px-2 py-6 text-center text-[var(--faint)]">Loading…</td></tr>
+              <tr><td colSpan={colSpan} className="px-2 py-6 text-center text-[var(--faint)]">Loading…</td></tr>
             )}
           </tbody>
         </table>
@@ -728,6 +740,82 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
           onClose={() => setPreview(null)} onApply={() => void apply()} />
       )}
       {inspecting && <ValueInspector column={inspecting.column} value={inspecting.value} onClose={() => setInspecting(null)} />}
+      {editingRow !== null && rows[editingRow] && result && (
+        <EditRowModal table={table} row={rows[editingRow]} rowNumber={result.offset + editingRow + 1}
+          initial={Object.fromEntries(table.columns.map((column) => {
+            const stagedKey = editKey(editingRow, column.name);
+            return [column.name, stagedKey in edits ? edits[stagedKey] : rows[editingRow][column.name]];
+          }))}
+          onClose={() => setEditingRow(null)}
+          onStage={(staged) => {
+            const row = rows[editingRow];
+            setEdits((current) => {
+              const next = { ...current };
+              for (const [column, value] of Object.entries(staged)) {
+                const stagedKey = editKey(editingRow, column);
+                if (Object.is(value, row[column])) delete next[stagedKey]; else next[stagedKey] = value;
+              }
+              return next;
+            });
+            setEditingRow(null);
+          }} />
+      )}
+    </div>
+  );
+}
+
+function EditRowModal({ table, row, rowNumber, initial, onClose, onStage }: {
+  table: DbTable;
+  row: Record<string, unknown>;
+  rowNumber: number;
+  initial: Record<string, unknown>;
+  onClose: () => void;
+  onStage: (staged: Record<string, unknown>) => void;
+}) {
+  const editable = (column: DbColumn) =>
+    !column.generated && (row[column.name] == null || typeof row[column.name] !== "object");
+  const seedFor = (column: DbColumn) => {
+    const value = initial[column.name];
+    return value === null || value === undefined ? "NULL" : displayDbValue(value);
+  };
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(table.columns.map((column) => [column.name, seedFor(column)])));
+  const submit = () => {
+    const staged: Record<string, unknown> = {};
+    for (const column of table.columns) {
+      if (!editable(column)) continue;
+      const raw = values[column.name] ?? "";
+      if (raw !== seedFor(column)) staged[column.name] = coerceCellValue(raw, column.type);
+    }
+    onStage(staged);
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div role="dialog" aria-label="Edit row" className="w-[560px] max-w-[calc(100vw-2rem)] max-h-[85vh] flex flex-col rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
+          <b className="text-sm text-[var(--text)]">Edit row {rowNumber} in {tableLabel(table)}</b>
+          <button aria-label="Close edit row" onClick={onClose} className="ml-auto text-[var(--muted)]">×</button>
+        </div>
+        <div className="overflow-auto p-4 grid gap-2">
+          {table.columns.map((column) => (
+            <label key={column.name} className="grid grid-cols-[140px_1fr] items-center gap-3 text-xs">
+              <span className="truncate text-[var(--muted)]" title={column.name}>
+                {column.name}
+                {column.pk ? <span className="ml-1 text-[9px] font-bold text-[var(--accent)]">PK</span> : null}
+              </span>
+              <input aria-label={`Edit field ${column.name}`} value={values[column.name] ?? ""}
+                disabled={!editable(column)}
+                onChange={(event) => setValues((current) => ({ ...current, [column.name]: event.target.value }))}
+                className="mono min-w-0 rounded-md border border-[var(--border-2)] bg-[var(--bg)] px-2 py-1.5 text-[var(--text)] outline-none focus:border-[var(--accent)] disabled:opacity-50" />
+            </label>
+          ))}
+          <span className="text-[10px] text-[var(--faint)]">Generated and binary/object columns are read-only; type NULL for a null value. Edits are staged for review.</span>
+        </div>
+        <div className="flex justify-end gap-2 px-4 py-3 border-t border-[var(--border)]">
+          <button onClick={onClose} className="px-3 py-1.5 text-xs font-semibold text-[var(--muted)]">Cancel</button>
+          <button onClick={submit} className="px-3 py-1.5 rounded-md text-xs font-bold bg-[var(--accent)] text-[var(--panel)]">Stage changes</button>
+        </div>
+      </div>
     </div>
   );
 }

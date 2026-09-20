@@ -36,6 +36,10 @@ function setValue(element: HTMLTextAreaElement, value: string) {
   Object.getOwnPropertyDescriptor((globalThis as any).HTMLTextAreaElement.prototype, "value")?.set?.call(element, value);
   element.dispatchEvent(new Event("input", { bubbles: true }));
 }
+function setInput(element: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor((globalThis as any).HTMLInputElement.prototype, "value")?.set?.call(element, value);
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+}
 
 async function exercise(width: number) {
   Object.defineProperty(win, "innerWidth", { value: width, configurable: true });
@@ -155,6 +159,30 @@ async function exercise(width: number) {
   [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Revert")?.click();
   await settle();
 
+  const editRow = byLabel("Edit row 1");
+  if (!editRow) fail(`${width}px: per-row edit action is missing`);
+  editRow.click();
+  await settle();
+  if (!container.querySelector('[role="dialog"][aria-label="Edit row"]')) fail(`${width}px: edit-row modal is not visible`);
+  const nameField = byLabel("Edit field name") as HTMLInputElement | null;
+  if (!nameField || nameField.value !== "Ada") fail(`${width}px: edit-row modal is not pre-filled with the row's values`);
+  const generatedField = byLabel("Edit field computed") as HTMLInputElement | null;
+  if (!generatedField || !generatedField.disabled) fail(`${width}px: generated column is editable in the edit-row modal`);
+  setInput(nameField, "Augusta");
+  await settle();
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Stage changes")?.click();
+  await settle();
+  if (![...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: modal edit was not staged`);
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Revert")?.click();
+  await settle();
+
+  byLabel("Edit row 3")?.click();
+  await settle();
+  const binaryField = byLabel("Edit field name") as HTMLInputElement | null;
+  if (!binaryField || !binaryField.disabled) fail(`${width}px: binary column is editable in the edit-row modal`);
+  byLabel("Close edit row")?.click();
+  await settle();
+
   const importCsv = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Import CSV");
   importCsv?.click();
   await settle();
@@ -201,6 +229,54 @@ async function exercise(width: number) {
   container.remove();
 }
 
+async function exerciseNoIdentity() {
+  const React = (await import("react")).default;
+  const { createRoot } = await import("react-dom/client");
+  const { flushSync } = await import("react-dom");
+  const { DataGrid } = await import("../src/WorkspaceDatabaseView.tsx");
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  flushSync(() => root.render(React.createElement(DataGrid, {
+    table: {
+      name: "logs", type: "table", rowCount: -1, ddl: "",
+      columns: [
+        { name: "id", type: "integer", notNull: false, pk: false, fk: null },
+        { name: "msg", type: "text", notNull: false, pk: false, fk: null },
+      ],
+    },
+    source: { kind: "sqlite", path: "/tmp/smoke.sqlite" },
+    writable: true,
+    columns: ["id", "msg"],
+    result: {
+      columns: ["id", "msg"],
+      rows: [{ id: 1, msg: "hi" }],
+      ms: 0.5,
+      hasMore: false,
+      offset: 0,
+    },
+    sorts: [],
+    pageSize: 100,
+    onSort: () => {},
+    onPrevious: () => {},
+    onNext: () => {},
+    onPageSize: () => {},
+    onDirtyChange: () => {},
+    onApplied: () => {},
+    onExportAll: async () => ({ columns: [], rows: [] }),
+  })));
+
+  if (container.querySelector('[aria-label="Edit row 1"]')) fail("row edit is offered without a detected row identity");
+  const del = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Delete selected");
+  if (del && !del.hasAttribute("disabled")) fail("delete is offered without a detected row identity");
+  if (!container.textContent?.includes("Updates require a primary or non-null unique key")) fail("identity hint is missing");
+
+  flushSync(() => root.unmount());
+  container.remove();
+}
+
 await exercise(1280);
 await exercise(480);
+await exerciseNoIdentity();
 console.log("PASS: data grid browse/edit/review/apply works at 1280px and 480px");
