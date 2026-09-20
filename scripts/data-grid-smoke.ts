@@ -255,8 +255,8 @@ async function exercise(width: number) {
   await settle();
   if ([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: staged edit survived a result replacement`);
 
-  // Apply must send exactly the reviewed change set — edits staged while the
-  // preview request is still in flight must not ride along unreviewed.
+  // While a review preview is in flight, new staging is blocked and Revert
+  // cancels the pending modal — then Apply sends exactly the reviewed set.
   render(baseResult);
   await settle();
   holdPreview = true;
@@ -274,12 +274,23 @@ async function exercise(width: number) {
   const idCell = container.querySelectorAll("tbody tr")[0]?.querySelectorAll("td")[2] as HTMLElement | undefined;
   idCell?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
   await settle();
-  const idEditor = byLabel("Edit row 1 id") as HTMLInputElement | null;
-  if (!idEditor) fail(`${width}px: second edit did not open while the preview was in flight`);
-  idEditor.value = "9";
-  idEditor.dispatchEvent(new Event("focusout", { bubbles: true }));
+  if (byLabel("Edit row 1 id")) fail(`${width}px: a cell editor opened while a review was in flight`);
+  if (!byLabel("Edit row 1")?.hasAttribute("disabled")) fail(`${width}px: row edit was not blocked while a review was in flight`);
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Revert")?.click();
   await settle();
   flushPreview();
+  await settle();
+  if (container.querySelector('[role="dialog"][aria-label="Review row changes"]')) fail(`${width}px: review modal opened after Revert cancelled it`);
+
+  [...container.querySelectorAll("td")].find((cell) => cell.textContent?.trim() === "Ada")
+    ?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  const restageEditor = byLabel("Edit row 1 name") as HTMLInputElement | null;
+  if (!restageEditor) fail(`${width}px: cell editor did not reopen after the cancelled review`);
+  restageEditor.value = "Augusta";
+  restageEditor.dispatchEvent(new Event("focusout", { bubbles: true }));
+  await settle();
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Review 1 change"))?.click();
   await settle();
   await settle();
   [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Apply transaction")?.click();

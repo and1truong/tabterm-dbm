@@ -474,6 +474,8 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const [editing, setEditing] = useState<string | null>(null);
   const [insertOpen, setInsertOpen] = useState(false);
   const [preview, setPreview] = useState<{ staged: RowChange[]; statements: RowChangeStatement[] } | null>(null);
+  const [reviewing, setReviewing] = useState(false);
+  const reviewRef = useRef(0);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
   const [transferBusy, setTransferBusy] = useState(false);
@@ -541,15 +543,25 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const revert = () => {
     setEdits({}); setDeleted(new Set()); setInserts([]); setEditing(null);
     setEditingRow(null); setPreview(null); setMutationError(null);
+    reviewRef.current++; setReviewing(false);
   };
   // Apply must send exactly what was reviewed — snapshot the change set at
   // review time so edits staged while the preview request is in flight can't
-  // ride along unreviewed.
+  // ride along unreviewed. `reviewing` blocks new staging for the same window,
+  // and the generation check drops a preview that resolves after a revert.
   const review = async () => {
     setMutationError(null);
     const staged = changes;
-    try { setPreview({ staged, statements: (await dbApi.rows.preview(staged)).statements }); }
-    catch (error) { setMutationError(String(error)); }
+    const request = ++reviewRef.current;
+    setReviewing(true);
+    try {
+      const statements = (await dbApi.rows.preview(staged)).statements;
+      if (request === reviewRef.current) setPreview({ staged, statements });
+    } catch (error) {
+      if (request === reviewRef.current) setMutationError(String(error));
+    } finally {
+      if (request === reviewRef.current) setReviewing(false);
+    }
   };
   const apply = async () => {
     if (!preview) return;
@@ -597,16 +609,16 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
           </div>
         )}
         <span className="h-5 w-px bg-[var(--border)]" />
-        <button onClick={() => setInsertOpen(true)} disabled={!canInsert}
+        <button onClick={() => setInsertOpen(true)} disabled={!canInsert || reviewing}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
           Add row
         </button>
-        <button onClick={() => setImportOpen(true)} disabled={!canInsert || dirty}
+        <button onClick={() => setImportOpen(true)} disabled={!canInsert || dirty || reviewing}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
           Import CSV
         </button>
         <button onClick={() => { setDeleted(new Set([...deleted, ...selected])); setSelected(new Set()); }}
-          disabled={!canEditRows || selected.size === 0}
+          disabled={!canEditRows || selected.size === 0 || reviewing}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--red)] hover:bg-[var(--hover)] disabled:opacity-40">
           Delete selected
         </button>
@@ -664,7 +676,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                 {canEditRows && (
                   <td className="w-8 px-1 py-1 border-b border-[var(--border)]">
                     <button aria-label={`Edit row ${result.offset + i + 1}`} title="Edit this row"
-                      disabled={deleted.has(i)} onClick={() => setEditingRow(i)}
+                      disabled={deleted.has(i) || reviewing} onClick={() => setEditingRow(i)}
                       className="p-1 rounded text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--accent)] disabled:opacity-30">
                       <Pencil size={12} />
                     </button>
@@ -679,7 +691,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                   const column = table.columns.find((candidate) => candidate.name === c);
                   const canEditCell = canEditRows && !column?.generated && !column?.identity && (v == null || typeof v !== "object");
                   return (
-                    <td key={c} onDoubleClick={() => canEditCell && !deleted.has(i) && setEditing(stagedKey)}
+                    <td key={c} onDoubleClick={() => canEditCell && !deleted.has(i) && !reviewing && setEditing(stagedKey)}
                       className={"px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)] align-top " + (isNum ? "text-right " : "") + (stagedKey in edits ? "bg-[var(--accent)]/10 " : "") + (canEditCell ? "cursor-text" : "")}>
                       {editing === stagedKey ? (
                         <input autoFocus aria-label={`Edit row ${result.offset + i + 1} ${c}`}
