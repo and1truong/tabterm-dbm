@@ -555,7 +555,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
     const request = ++reviewRef.current;
     setReviewing(true);
     try {
-      const statements = (await dbApi.rows.preview(staged)).statements;
+      const statements = (await dbApi.rows.preview(source, staged)).statements;
       if (request === reviewRef.current) setPreview({ staged, statements });
     } catch (error) {
       if (request === reviewRef.current) setMutationError(String(error));

@@ -51,8 +51,8 @@ export const dbApi = {
   exec: (src: DbSource, sql: string, allowWrite: boolean) =>
     post<ExecResult>(`${API}/exec`, { ...selector(src), sql, allowWrite }),
   rows: {
-    preview: (changes: RowChange[]) =>
-      post<{ statements: RowChangeStatement[] }>(`${API}/rows/preview`, { changes }),
+    preview: (src: DbSource, changes: RowChange[]) =>
+      post<{ statements: RowChangeStatement[] }>(`${API}/rows/preview`, { ...selector(src), changes }),
     apply: (src: DbSource, changes: RowChange[], signal?: AbortSignal) =>
       post<RowMutationResult>(`${API}/rows/apply`, { ...selector(src), changes, allowWrite: true }, signal),
   },

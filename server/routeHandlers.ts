@@ -1,7 +1,7 @@
 import type { Connections } from "./connections.ts";
 import { createDatabase, discoverDatabases, explainQuery, readInsights, readSchema, runMigration, runQuery, runExec, runRowChanges } from "./dbServer.ts";
 import { explainPgQuery, readPgInsights, readPgSchema, runPgMigration, runPgQuery, runPgExec, runPgRowChanges, testPgConnection } from "./pgServer.ts";
-import { compileRowChanges } from "./rowMutations.ts";
+import { compileRowChanges, toPostgresMutationSql } from "./rowMutations.ts";
 import type { RowChange } from "../shared.ts";
 import { DbError } from "../shared.ts";
 
@@ -119,10 +119,14 @@ export function makeHandlers(conns: Connections) {
     },
 
     async rowPreview(req: Request): Promise<Response> {
-      let b: { changes?: RowChange[] };
+      let b: { connId?: string; changes?: RowChange[] };
       try { b = await req.json() as typeof b; } catch { return Response.json({ error: "invalid json" }, { status: 400 }); }
       try {
-        return Response.json({ statements: compileRowChanges(b.changes ?? []) });
+        const statements = compileRowChanges(b.changes ?? []);
+        // Show the SQL that will actually execute — Postgres dispatch rewrites
+        // placeholders and null-safe equality before running.
+        if (b.connId) return Response.json({ statements: statements.map((s) => ({ ...s, sql: toPostgresMutationSql(s.sql) })) });
+        return Response.json({ statements });
       } catch (e) { return dbErrorResponse(e); }
     },
 
