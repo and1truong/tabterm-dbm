@@ -169,17 +169,22 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   const routedTableContext = route.modal ? activeTable : route.table;
   rowsContextRef.current = `${sourceKey ?? ""}\0${activeTable ?? ""}\0${routedTableContext ?? ""}\0${pane}`;
 
+  const loadRef = useRef(0);
   const loadRows = useCallback(async (signal?: AbortSignal) => {
     if (!activeSource || !queryRef.current) return;
+    const request = ++loadRef.current;
     const requestContext = rowsContextRef.current;
     setErr(null);
     try {
       const q = queryRef.current;
       const r = await dbApi.query(activeSource, q.sql, q.params, q.limit, q.offset, signal);
-      if (rowsContextRef.current !== requestContext) return;
+      // Overlapping loads (e.g. the post-apply reload racing a table switch)
+      // must land in order — drop resolutions that aren't the latest request
+      // or were issued under a different table/source context.
+      if (request !== loadRef.current || rowsContextRef.current !== requestContext) return;
       setResult(r);
     } catch (e) {
-      if (signal?.aborted || rowsContextRef.current !== requestContext) return;
+      if (request !== loadRef.current || signal?.aborted || rowsContextRef.current !== requestContext) return;
       setResult(null); setErr(String(e));
     }
   }, [sourceKey]);
