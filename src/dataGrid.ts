@@ -92,13 +92,13 @@ export function buildRowChanges(
       if (identity.length) changes.push({ kind: "delete", table: tableRef, key, expected });
       return;
     }
-    const values: Record<string, unknown> = {};
+    const changed: [string, unknown][] = [];
     for (const column of table.columns) {
       const stagedKey = editKey(rowIndex, column.name);
-      if (stagedKey in edits) values[column.name] = edits[stagedKey];
+      if (stagedKey in edits) changed.push([column.name, edits[stagedKey]]);
     }
-    if (identity.length && Object.keys(values).length) {
-      changes.push({ kind: "update", table: tableRef, key, expected, values });
+    if (identity.length && changed.length) {
+      changes.push({ kind: "update", table: tableRef, key, expected, values: Object.fromEntries(changed) });
     }
   });
   for (const values of inserts) changes.push({ kind: "insert", table: tableRef, values });

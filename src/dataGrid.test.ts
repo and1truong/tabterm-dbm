@@ -79,6 +79,21 @@ describe("staged row changes", () => {
     ]);
   });
 
+  test("keeps staged values for a column named __proto__", () => {
+    const protoTable: DbTable = {
+      name: "t", type: "table", rowCount: -1, ddl: "",
+      columns: [
+        { name: "id", type: "integer", notNull: true, pk: true, fk: null },
+        { name: "__proto__", type: "text", notNull: false, pk: false, fk: null },
+      ],
+    };
+    const row = Object.fromEntries([["id", 1], ["__proto__", "a"]]);
+    const [update] = buildRowChanges(protoTable, [row], { [editKey(0, "__proto__")]: "b" }, new Set(), []);
+    if (update.kind !== "update") throw new Error("expected an update change");
+    expect(Object.prototype.hasOwnProperty.call(update.values, "__proto__")).toBe(true);
+    expect(update.values["__proto__"]).toBe("b");
+  });
+
   test("omits non-comparable PostgreSQL columns from optimistic predicates", () => {
     const jsonTable: DbTable = {
       name: "events", schema: "public", type: "table", rowCount: -1, ddl: "",

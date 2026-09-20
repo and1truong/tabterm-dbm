@@ -803,13 +803,13 @@ function EditRowModal({ table, row, rowNumber, initial, onClose, onStage }: {
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(table.columns.map((column) => [column.name, seedFor(column)])));
   const submit = () => {
-    const staged: Record<string, unknown> = {};
+    const staged: [string, unknown][] = [];
     for (const column of table.columns) {
       if (!editable(column)) continue;
       const raw = values[column.name] ?? "";
-      if (raw !== seedFor(column)) staged[column.name] = coerceCellValue(raw, column.type);
+      if (raw !== seedFor(column)) staged.push([column.name, coerceCellValue(raw, column.type)]);
     }
-    onStage(staged);
+    onStage(Object.fromEntries(staged));
   };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>
@@ -850,12 +850,12 @@ function InsertRowModal({ table, onClose, onAdd }: {
   const [values, setValues] = useState<Record<string, string>>({});
   const writableColumns = table.columns.filter((column) => !column.generated && !column.identity);
   const submit = () => {
-    const row: Record<string, unknown> = {};
+    const row: [string, unknown][] = [];
     for (const column of writableColumns) {
       const raw = values[column.name];
-      if (raw !== undefined && raw !== "") row[column.name] = coerceCellValue(raw, column.type);
+      if (raw !== undefined && raw !== "") row.push([column.name, coerceCellValue(raw, column.type)]);
     }
-    onAdd(row);
+    onAdd(Object.fromEntries(row));
   };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>
