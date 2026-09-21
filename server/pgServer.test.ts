@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { collectPgKeyMetadata, toPgPlaceholders, readPgSchema, runPgQuery, runPgExec } from "./pgServer.ts";
+import { collectPgKeyMetadata, toPgPlaceholders, readPgSchema, runPgQuery, runPgExec, runPgRowChanges } from "./pgServer.ts";
 import { DbError } from "../shared.ts";
 
 describe("toPgPlaceholders", () => {
@@ -71,6 +71,18 @@ test("pairs composite foreign-key columns by catalog ordinal", () => {
   expect(metadata.foreign.get("audit.events.actor_id")).toBe("core.users(id)");
 });
 
+test("groups standalone unique-index columns by index name", () => {
+  // Row shape emitted by the pg_index query for a CREATE UNIQUE INDEX outside
+  // any constraint — constraint_name carries the index name, refs are null.
+  const metadata = collectPgKeyMetadata([
+    { table_schema: "public", table_name: "accounts", constraint_name: "accounts_email_idx", constraint_type: "UNIQUE", column_name: "email", ref_schema: null, ref_table: null, ref_column: null },
+    { table_schema: "public", table_name: "accounts", constraint_name: "accounts_tenant_slug_idx", constraint_type: "UNIQUE", column_name: "tenant_id", ref_schema: null, ref_table: null, ref_column: null },
+    { table_schema: "public", table_name: "accounts", constraint_name: "accounts_tenant_slug_idx", constraint_type: "UNIQUE", column_name: "slug", ref_schema: null, ref_table: null, ref_column: null },
+  ]);
+  expect(metadata.uniqueGroups.get("public.accounts.accounts_email_idx")).toEqual(["email"]);
+  expect(metadata.uniqueGroups.get("public.accounts.accounts_tenant_slug_idx")).toEqual(["tenant_id", "slug"]);
+});
+
 // Integration tests require a live Postgres. Set TEST_PG_URL to enable, e.g.
 //   TEST_PG_URL=postgres://postgres:pw@localhost:5432/postgres bun test pgServer
 const PG = process.env.TEST_PG_URL;
@@ -129,5 +141,58 @@ pgDescribe("pgServer (live)", () => {
 
   test("bad connection surfaces a DbError", async () => {
     await expect(readPgSchema("postgres://nobody:nobody@127.0.0.1:1/none")).rejects.toBeInstanceOf(DbError);
+  });
+
+  test("standalone unique index surfaces as a row identity", async () => {
+    await runPgExec(url, `DROP TABLE IF EXISTS ${T}_uidx`);
+    await runPgExec(url, `CREATE TABLE ${T}_uidx (slug text NOT NULL, note text)`);
+    await runPgExec(url, `CREATE UNIQUE INDEX ${T}_uidx_slug ON ${T}_uidx (slug)`);
+    // Constraint-backed, partial, and expression indexes must not qualify. The
+    // expression case is a MIXED index — a pure `(lower(slug))` index emits no
+    // rows regardless, so only a mixed one actually exercises the indexprs
+    // filter (it would otherwise advertise ["note"] as unique).
+    await runPgExec(url, `CREATE UNIQUE INDEX ${T}_uidx_partial ON ${T}_uidx (note) WHERE note IS NOT NULL`);
+    await runPgExec(url, `CREATE UNIQUE INDEX ${T}_uidx_expr ON ${T}_uidx (note, (lower(slug)))`);
+
+    const schema = await readPgSchema(url);
+    const tbl = schema.tables.find((t) => t.name === `${T}_uidx`);
+    expect(tbl!.uniqueKeys).toContainEqual(["slug"]);
+    expect(tbl!.uniqueKeys).not.toContainEqual(["note"]);
+    expect(tbl!.uniqueKeys).not.toContainEqual(["lower"]);
+
+    await runPgExec(url, `DROP TABLE ${T}_uidx`);
+  });
+
+  test("runPgRowChanges applies a batch and rolls back on conflict", async () => {
+    await runPgExec(url, `DROP TABLE IF EXISTS ${T}_mut`);
+    await runPgExec(url, `CREATE TABLE ${T}_mut (slug text PRIMARY KEY, note text)`);
+    const table = { name: `${T}_mut` };
+
+    const inserted = await runPgRowChanges(url, [
+      { kind: "insert", table, values: { slug: "a", note: "one" } },
+      { kind: "insert", table, values: { slug: "b", note: null } },
+    ]);
+    expect(inserted).toMatchObject({ applied: 2, rowsAffected: 2 });
+
+    const updated = await runPgRowChanges(url, [
+      { kind: "update", table, key: { slug: "a" }, expected: { slug: "a", note: "one" }, values: { note: "two" } },
+    ]);
+    expect(updated.rowsAffected).toBe(1);
+
+    // A stale `expected` must conflict and roll the whole batch back — the
+    // delete of a healthy row behind it must not land.
+    await expect(runPgRowChanges(url, [
+      { kind: "update", table, key: { slug: "a" }, expected: { slug: "a", note: "stale" }, values: { note: "x" } },
+      { kind: "delete", table, key: { slug: "b" }, expected: { slug: "b", note: null } },
+    ])).rejects.toMatchObject({ code: "conflict" });
+    const alive = await runPgQuery(url, `SELECT slug, note FROM ${T}_mut ORDER BY slug`, [], 100);
+    expect(alive.rows).toEqual([{ slug: "a", note: "two" }, { slug: "b", note: null }]);
+
+    const deleted = await runPgRowChanges(url, [
+      { kind: "delete", table, key: { slug: "b" }, expected: { slug: "b", note: null } },
+    ]);
+    expect(deleted.rowsAffected).toBe(1);
+
+    await runPgExec(url, `DROP TABLE ${T}_mut`);
   });
 });

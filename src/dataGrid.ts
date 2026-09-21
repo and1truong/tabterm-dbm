@@ -48,9 +48,12 @@ export function rowsToCsv(columns: string[], rows: Record<string, unknown>[]): s
   ].join("\n");
 }
 
-export function coerceCellValue(raw: string, type: string): unknown {
+export function coerceCellValue(raw: string, type: string, original?: unknown): unknown {
   const value = raw.trim();
   if (value.toUpperCase() === "NULL") return null;
+  // A blank input in a numeric/boolean column is a clear-to-NULL, not the
+  // string "" — SQLite would otherwise happily store TEXT in the slot.
+  if (value === "" && /\b(INT|INTEGER|BIGINT|SMALLINT|INT8|SERIAL|BIGSERIAL|REAL|FLOAT|DOUBLE|DECIMAL|NUMERIC|BOOL|BOOLEAN)\b/i.test(type)) return null;
   if (/\b(DECIMAL|NUMERIC)\b/i.test(type) && value !== "") return value;
   if (/\b(INT|INTEGER|BIGINT|SMALLINT|INT8|SERIAL|BIGSERIAL)\b/i.test(type) && /^[-+]?\d+$/.test(value)) {
     const number = Number(value);
@@ -63,6 +66,12 @@ export function coerceCellValue(raw: string, type: string): unknown {
   if (/\b(BOOL|BOOLEAN)\b/i.test(type)) {
     if (/^(true|1)$/i.test(raw.trim())) return true;
     if (/^(false|0)$/i.test(raw.trim())) return false;
+  }
+  // Columns without a recognised declared type (untyped/BLOB-affinity SQLite)
+  // keep the current value's affinity: numeric input stays a number.
+  if (typeof original === "number" && value !== "" && !/\b(TEXT|CHAR|CLOB|VARCHAR)\b/i.test(type)) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
   }
   return raw;
 }
@@ -92,13 +101,13 @@ export function buildRowChanges(
       if (identity.length) changes.push({ kind: "delete", table: tableRef, key, expected });
       return;
     }
-    const values: Record<string, unknown> = {};
+    const changed: [string, unknown][] = [];
     for (const column of table.columns) {
       const stagedKey = editKey(rowIndex, column.name);
-      if (stagedKey in edits) values[column.name] = edits[stagedKey];
+      if (stagedKey in edits) changed.push([column.name, edits[stagedKey]]);
     }
-    if (identity.length && Object.keys(values).length) {
-      changes.push({ kind: "update", table: tableRef, key, expected, values });
+    if (identity.length && changed.length) {
+      changes.push({ kind: "update", table: tableRef, key, expected, values: Object.fromEntries(changed) });
     }
   });
   for (const values of inserts) changes.push({ kind: "insert", table: tableRef, values });

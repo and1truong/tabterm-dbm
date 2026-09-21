@@ -18,12 +18,21 @@ Object.defineProperty((globalThis as any).navigator, "clipboard", {
   value: { writeText: async (value: string) => { clipboard = value; } },
   configurable: true,
 });
-(globalThis as any).fetch = async (input: string | URL | Request) => {
+let holdPreview = false;
+const previewResolvers: (() => void)[] = [];
+const flushPreview = () => { holdPreview = false; previewResolvers.splice(0).forEach((resolve) => resolve()); };
+let lastApplyBody: { changes?: unknown[] } | null = null;
+(globalThis as any).fetch = async (input: string | URL | Request, init?: RequestInit) => {
   const url = String(input);
   if (url.endsWith("/rows/preview")) {
-    return Response.json({ statements: [{ kind: "update", sql: `UPDATE "users" SET "name" = ? WHERE "id" IS ?`, params: ["Augusta", 1] }] });
+    const respond = () => Response.json({ statements: [{ kind: "update", sql: `UPDATE "users" SET "name" = ? WHERE "id" IS ?`, params: ["Augusta", 1] }] });
+    if (holdPreview) return new Promise<Response>((resolve) => previewResolvers.push(() => resolve(respond())));
+    return respond();
   }
-  if (url.endsWith("/rows/apply")) return Response.json({ applied: 1, rowsAffected: 1, ms: 1 });
+  if (url.endsWith("/rows/apply")) {
+    lastApplyBody = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    return Response.json({ applied: 1, rowsAffected: 1, ms: 1 });
+  }
   return Response.json({ error: "unexpected smoke request" }, { status: 500 });
 };
 
@@ -34,6 +43,10 @@ function fail(message: string): never {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 function setValue(element: HTMLTextAreaElement, value: string) {
   Object.getOwnPropertyDescriptor((globalThis as any).HTMLTextAreaElement.prototype, "value")?.set?.call(element, value);
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+}
+function setInput(element: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor((globalThis as any).HTMLInputElement.prototype, "value")?.set?.call(element, value);
   element.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
@@ -48,30 +61,32 @@ async function exercise(width: number) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  flushSync(() => root.render(React.createElement(DataGrid, {
+  const baseResult = {
+    columns: ["id", "name", "computed", "misc"],
+    rows: [
+      { id: 1, name: "Ada", computed: 2, misc: 42 },
+      { id: 2, name: "G".repeat(200), computed: 4, misc: 7 },
+      { id: 3, name: { __tabtermDbmWire: { kind: "binary", base64: "AA==" } }, computed: 6, misc: 8 },
+      { id: 4, name: { ok: true }, computed: 8, misc: 9 },
+    ],
+    ms: 1.2,
+    hasMore: true,
+    offset: 0,
+  };
+  const gridProps = {
     table: {
       name: "users", type: "table", rowCount: -1, ddl: "",
       columns: [
         { name: "id", type: "integer", notNull: true, pk: true, fk: null },
         { name: "name", type: "text", notNull: true, pk: false, fk: null },
         { name: "computed", type: "integer", notNull: true, pk: false, fk: null, generated: true },
+        { name: "seq", type: "integer", notNull: true, pk: false, fk: null, identity: true },
+        { name: "misc", type: "", notNull: false, pk: false, fk: null },
       ],
     },
     source: { kind: "sqlite", path: "/tmp/smoke.sqlite" },
     writable: true,
-    columns: ["id", "name", "computed"],
-    result: {
-      columns: ["id", "name", "computed"],
-      rows: [
-        { id: 1, name: "Ada", computed: 2 },
-        { id: 2, name: "G".repeat(200), computed: 4 },
-        { id: 3, name: { __tabtermDbmWire: { kind: "binary", base64: "AA==" } }, computed: 6 },
-        { id: 4, name: { ok: true }, computed: 8 },
-      ],
-      ms: 1.2,
-      hasMore: true,
-      offset: 0,
-    },
+    columns: ["id", "name", "computed", "seq", "misc"],
     sorts: [],
     pageSize: 100,
     onSort: (column: string, additive: boolean) => events.push(`sort:${column}:${additive}`),
@@ -81,7 +96,10 @@ async function exercise(width: number) {
     onDirtyChange: (dirty: boolean) => events.push(`dirty:${dirty}`),
     onApplied: () => events.push("applied"),
     onExportAll: async () => ({ columns: ["id", "name", "computed"], rows: [{ id: 1, name: "Ada", computed: 2 }, { id: 2, name: "Grace", computed: 4 }] }),
-  })));
+  };
+  const render = (result: typeof baseResult) =>
+    flushSync(() => root.render(React.createElement(DataGrid, { ...gridProps, result })));
+  render(baseResult);
 
   const byLabel = (label: string) => container.querySelector(`[aria-label="${label}"]`) as HTMLElement | null;
   const sort = byLabel("Sort by name");
@@ -97,7 +115,7 @@ async function exercise(width: number) {
   if (!copy) fail(`${width}px: copy control is not visible`);
   copy.click();
   await settle();
-  if (clipboard !== "id,name,computed\n1,Ada,2") fail(`${width}px: selected-row CSV was ${JSON.stringify(clipboard)}`);
+  if (clipboard !== "id,name,computed,misc\n1,Ada,2,42") fail(`${width}px: selected-row CSV was ${JSON.stringify(clipboard)}`);
 
   const next = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Next");
   if (!next || next.hasAttribute("disabled")) fail(`${width}px: next page is not available`);
@@ -114,7 +132,7 @@ async function exercise(width: number) {
   if (!events.includes("size:50")) fail(`${width}px: page-size interaction did not fire`);
   if (!container.textContent?.includes("1–4+")) fail(`${width}px: result range is missing`);
 
-  const columnsButton = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Columns 3/3");
+  const columnsButton = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Columns 4/4");
   columnsButton?.click();
   await settle();
   if (!container.querySelectorAll('input[type="checkbox"]').length) fail(`${width}px: column chooser is missing`);
@@ -137,11 +155,21 @@ async function exercise(width: number) {
   await settle();
   if (byLabel("Edit row 4 name")) fail(`${width}px: object-valued cell incorrectly opened the text editor`);
 
-  const generatedCell = container.querySelectorAll("tbody tr")[0]?.querySelectorAll("td")[3] as HTMLElement | undefined;
+  const generatedCell = container.querySelectorAll("tbody tr")[0]?.querySelectorAll("td")[4] as HTMLElement | undefined;
   if (!generatedCell) fail(`${width}px: generated cell is missing`);
   generatedCell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
   await settle();
   if (byLabel("Edit row 1 computed")) fail(`${width}px: generated cell incorrectly opened the editor`);
+
+  const miscCell = [...container.querySelectorAll("td")].find((cell) => cell.textContent?.trim() === "42");
+  if (!miscCell) fail(`${width}px: untyped numeric cell is missing`);
+  miscCell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  const miscEditor = byLabel("Edit row 1 misc") as HTMLInputElement | null;
+  if (!miscEditor) fail(`${width}px: untyped cell did not open the editor`);
+  miscEditor.dispatchEvent(new Event("focusout", { bubbles: true }));
+  await settle();
+  if ([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: blur with no input staged a phantom type-changing edit`);
 
   const addRow = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Add row");
   addRow?.click();
@@ -153,6 +181,37 @@ async function exercise(width: number) {
   await settle();
   if (![...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: default-values row was not staged`);
   [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Revert")?.click();
+  await settle();
+
+  const editRow = byLabel("Edit row 1");
+  if (!editRow) fail(`${width}px: per-row edit action is missing`);
+  editRow.click();
+  await settle();
+  if (!container.querySelector('[role="dialog"][aria-label="Edit row"]')) fail(`${width}px: edit-row modal is not visible`);
+  // The backdrop blocks pointer input only — the staging lock must keep the
+  // toolbar from staging behind (or onto) the open modal.
+  if (!byLabel("Edit row 2")?.hasAttribute("disabled")) fail(`${width}px: row edit was not blocked while the edit modal was open`);
+  const addRowBehindModal = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Add row");
+  if (addRowBehindModal && !addRowBehindModal.hasAttribute("disabled")) fail(`${width}px: add row was not blocked while the edit modal was open`);
+  const nameField = byLabel("Edit field name") as HTMLInputElement | null;
+  if (!nameField || nameField.value !== "Ada") fail(`${width}px: edit-row modal is not pre-filled with the row's values`);
+  const generatedField = byLabel("Edit field computed") as HTMLInputElement | null;
+  if (!generatedField || !generatedField.disabled) fail(`${width}px: generated column is editable in the edit-row modal`);
+  const identityField = byLabel("Edit field seq") as HTMLInputElement | null;
+  if (!identityField || !identityField.disabled) fail(`${width}px: identity column is editable in the edit-row modal`);
+  setInput(nameField, "Augusta");
+  await settle();
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Stage changes")?.click();
+  await settle();
+  if (![...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: modal edit was not staged`);
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Revert")?.click();
+  await settle();
+
+  byLabel("Edit row 3")?.click();
+  await settle();
+  const binaryField = byLabel("Edit field name") as HTMLInputElement | null;
+  if (!binaryField || !binaryField.disabled) fail(`${width}px: binary column is editable in the edit-row modal`);
+  byLabel("Close edit row")?.click();
   await settle();
 
   const importCsv = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Import CSV");
@@ -197,10 +256,173 @@ async function exercise(width: number) {
   if (!events.includes("dirty:true")) fail(`${width}px: staged edit did not lock navigation`);
   if (!events.includes("applied")) fail(`${width}px: apply transaction did not complete`);
 
+  // A refresh landing after an edit is staged must drop index-keyed staging,
+  // or the change would retarget onto whatever row now holds that index.
+  const adaAgain = [...container.querySelectorAll("td")].find((cell) => cell.textContent?.trim() === "Ada");
+  adaAgain?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  const lateEditor = byLabel("Edit row 1 name") as HTMLInputElement | null;
+  if (!lateEditor) fail(`${width}px: cell editor did not reopen for the result-replacement check`);
+  lateEditor.value = "Augusta";
+  lateEditor.dispatchEvent(new Event("focusout", { bubbles: true }));
+  await settle();
+  if (![...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: re-staged edit is missing`);
+  render({ ...baseResult, rows: [...baseResult.rows].reverse() });
+  await settle();
+  if ([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail(`${width}px: staged edit survived a result replacement`);
+
+  // While a review preview is in flight, new staging is blocked and Revert
+  // cancels the pending modal — then Apply sends exactly the reviewed set.
+  render(baseResult);
+  await settle();
+  holdPreview = true;
+  [...container.querySelectorAll("td")].find((cell) => cell.textContent?.trim() === "Ada")
+    ?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  const snapshotEditor = byLabel("Edit row 1 name") as HTMLInputElement | null;
+  if (!snapshotEditor) fail(`${width}px: cell editor did not open for the apply-snapshot check`);
+  snapshotEditor.value = "Augusta";
+  snapshotEditor.dispatchEvent(new Event("focusout", { bubbles: true }));
+  await settle();
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Review 1 change"))?.click();
+  await settle();
+  if (container.querySelector('[role="dialog"][aria-label="Review row changes"]')) fail(`${width}px: review modal opened before its preview resolved`);
+  const idCell = container.querySelectorAll("tbody tr")[0]?.querySelectorAll("td")[2] as HTMLElement | undefined;
+  idCell?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  if (byLabel("Edit row 1 id")) fail(`${width}px: a cell editor opened while a review was in flight`);
+  if (!byLabel("Edit row 1")?.hasAttribute("disabled")) fail(`${width}px: row edit was not blocked while a review was in flight`);
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Revert")?.click();
+  await settle();
+  flushPreview();
+  await settle();
+  if (container.querySelector('[role="dialog"][aria-label="Review row changes"]')) fail(`${width}px: review modal opened after Revert cancelled it`);
+
+  [...container.querySelectorAll("td")].find((cell) => cell.textContent?.trim() === "Ada")
+    ?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await settle();
+  const restageEditor = byLabel("Edit row 1 name") as HTMLInputElement | null;
+  if (!restageEditor) fail(`${width}px: cell editor did not reopen after the cancelled review`);
+  restageEditor.value = "Augusta";
+  restageEditor.dispatchEvent(new Event("focusout", { bubbles: true }));
+  await settle();
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Review 1 change"))?.click();
+  await settle();
+  await settle();
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Apply transaction")?.click();
+  await settle();
+  await settle();
+  if (!lastApplyBody || lastApplyBody.changes?.length !== 1) fail(`${width}px: apply sent ${lastApplyBody?.changes?.length ?? "no"} changes instead of the reviewed one`);
+
+  flushSync(() => root.unmount());
+  container.remove();
+}
+
+async function exerciseNoIdentity() {
+  const React = (await import("react")).default;
+  const { createRoot } = await import("react-dom/client");
+  const { flushSync } = await import("react-dom");
+  const { DataGrid } = await import("../src/WorkspaceDatabaseView.tsx");
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  flushSync(() => root.render(React.createElement(DataGrid, {
+    table: {
+      name: "logs", type: "table", rowCount: -1, ddl: "",
+      columns: [
+        { name: "id", type: "integer", notNull: false, pk: false, fk: null },
+        { name: "msg", type: "text", notNull: false, pk: false, fk: null },
+      ],
+    },
+    source: { kind: "sqlite", path: "/tmp/smoke.sqlite" },
+    writable: true,
+    columns: ["id", "msg"],
+    result: {
+      columns: ["id", "msg"],
+      rows: [{ id: 1, msg: "hi" }],
+      ms: 0.5,
+      hasMore: false,
+      offset: 0,
+    },
+    sorts: [],
+    pageSize: 100,
+    onSort: () => {},
+    onPrevious: () => {},
+    onNext: () => {},
+    onPageSize: () => {},
+    onDirtyChange: () => {},
+    onApplied: () => {},
+    onExportAll: async () => ({ columns: [], rows: [] }),
+  })));
+
+  if (container.querySelector('[aria-label="Edit row 1"]')) fail("row edit is offered without a detected row identity");
+  const del = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Delete selected");
+  if (del && !del.hasAttribute("disabled")) fail("delete is offered without a detected row identity");
+  if (!container.textContent?.includes("Updates require a primary or non-null unique key")) fail("identity hint is missing");
+
+  flushSync(() => root.unmount());
+  container.remove();
+}
+
+async function exerciseProtoColumn() {
+  const React = (await import("react")).default;
+  const { createRoot } = await import("react-dom/client");
+  const { flushSync } = await import("react-dom");
+  const { DataGrid } = await import("../src/WorkspaceDatabaseView.tsx");
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const byLabel = (label: string) => container.querySelector(`[aria-label="${label}"]`) as HTMLElement | null;
+  flushSync(() => root.render(React.createElement(DataGrid, {
+    table: {
+      name: "odd", type: "table", rowCount: -1, ddl: "",
+      columns: [
+        { name: "id", type: "integer", notNull: true, pk: true, fk: null },
+        { name: "__proto__", type: "text", notNull: false, pk: false, fk: null },
+      ],
+    },
+    source: { kind: "sqlite", path: "/tmp/smoke.sqlite" },
+    writable: true,
+    columns: ["id", "__proto__"],
+    result: {
+      columns: ["id", "__proto__"],
+      // JSON.parse — a "__proto__" key in an object literal would set the
+      // row's prototype instead of creating an own property.
+      rows: [JSON.parse('{"id":1,"__proto__":"keep"}')],
+      ms: 0.5,
+      hasMore: false,
+      offset: 0,
+    },
+    sorts: [],
+    pageSize: 100,
+    onSort: () => {},
+    onPrevious: () => {},
+    onNext: () => {},
+    onPageSize: () => {},
+    onDirtyChange: () => {},
+    onApplied: () => {},
+    onExportAll: async () => ({ columns: [], rows: [] }),
+  })));
+
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Add row")?.click();
+  await settle();
+  const protoField = byLabel("New __proto__") as HTMLInputElement | null;
+  if (!protoField) fail("add-row modal is missing the __proto__ column field");
+  if (protoField.value !== "") fail(`__proto__ field prefilled with ${JSON.stringify(protoField.value)} instead of blank`);
+  setInput(protoField, "x");
+  await settle();
+  [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Stage row")?.click();
+  await settle();
+  if (![...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Review 1 change"))) fail("staging a row with a __proto__ column did not work");
+
   flushSync(() => root.unmount());
   container.remove();
 }
 
 await exercise(1280);
 await exercise(480);
+await exerciseNoIdentity();
+await exerciseProtoColumn();
 console.log("PASS: data grid browse/edit/review/apply works at 1280px and 480px");

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Database as DbIcon, RefreshCw, Plus, ChevronDown, Table2, Eye, Filter as FilterIcon, Search } from "lucide-react";
+import { Database as DbIcon, RefreshCw, Plus, ChevronDown, Table2, Eye, Filter as FilterIcon, Search, Pencil } from "lucide-react";
 import type { ClientHost } from "@tabterm/module-host/client";
 import Notice from "./Notice.tsx";
 import { dbApi } from "./dbApi.ts";
@@ -9,7 +9,7 @@ import type { FilterModel } from "./dbFilter.ts";
 import { DatabaseOpenModal } from "./DatabaseOpenModal.tsx";
 import { DatabaseFilterBuilder } from "./DatabaseFilterBuilder.tsx";
 import { DatabaseCreateViewModal } from "./DatabaseCreateViewModal.tsx";
-import type { DatabaseInsights, DbFile, DbSchema, DbTable, DbColumn, QueryResult, RowChangeStatement } from "../shared.ts";
+import type { DatabaseInsights, DbFile, DbSchema, DbTable, DbColumn, QueryResult, RowChange, RowChangeStatement } from "../shared.ts";
 import { tableKey, tableLabel, tableSql } from "./sqlIdentifiers.ts";
 import { buildRowChanges, coerceCellValue, editKey, orderBySql, rowsToCsv, toggleSort } from "./dataGrid.ts";
 import type { SortSpec } from "./dataGrid.ts";
@@ -157,8 +157,17 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   // rewrites `?`→`$n` for Postgres).
   const activeTbl: DbTable | undefined = schema?.tables.find((t) => tableKey(t) === activeTable);
   const queryRef = useRef<{ sql: string; params: unknown[]; limit: number; offset: number } | null>(null);
+  let filterError: string | null = null;
   if (activeSource && activeTable && activeTbl) {
-    const { where, params } = compileGroup(filterModel, activeTbl.columns, activeSource.kind);
+    let where = "", params: unknown[] = [];
+    try {
+      ({ where, params } = compileGroup(filterModel, activeTbl.columns, activeSource.kind));
+    } catch (error) {
+      // An unparseable rule value (e.g. a non-numeric in a numeric op) must not
+      // crash render — fail closed and surface the reason instead.
+      where = "1 = 0";
+      filterError = error instanceof Error ? error.message : String(error);
+    }
     const base = `SELECT * FROM ${tableSql(activeTbl)}`;
     const sql = (where ? `${base} WHERE ${where}` : base) + orderBySql(sorts);
     queryRef.current = { sql, params, limit: pageSize, offset: page * pageSize };
@@ -169,17 +178,22 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
   const routedTableContext = route.modal ? activeTable : route.table;
   rowsContextRef.current = `${sourceKey ?? ""}\0${activeTable ?? ""}\0${routedTableContext ?? ""}\0${pane}`;
 
+  const loadRef = useRef(0);
   const loadRows = useCallback(async (signal?: AbortSignal) => {
     if (!activeSource || !queryRef.current) return;
+    const request = ++loadRef.current;
     const requestContext = rowsContextRef.current;
     setErr(null);
     try {
       const q = queryRef.current;
       const r = await dbApi.query(activeSource, q.sql, q.params, q.limit, q.offset, signal);
-      if (rowsContextRef.current !== requestContext) return;
+      // Overlapping loads (e.g. the post-apply reload racing a table switch)
+      // must land in order — drop resolutions that aren't the latest request
+      // or were issued under a different table/source context.
+      if (request !== loadRef.current || rowsContextRef.current !== requestContext) return;
       setResult(r);
     } catch (e) {
-      if (signal?.aborted || rowsContextRef.current !== requestContext) return;
+      if (request !== loadRef.current || signal?.aborted || rowsContextRef.current !== requestContext) return;
       setResult(null); setErr(String(e));
     }
   }, [sourceKey]);
@@ -194,7 +208,14 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
     if (pane !== "data" || !activeSource || !activeTable) return;
     const controller = new AbortController();
     const t = setTimeout(() => { void loadRows(controller.signal); }, 150);
-    return () => { clearTimeout(t); controller.abort(); };
+    return () => {
+      clearTimeout(t);
+      controller.abort();
+      // Invalidate in-flight loads the moment the query context changes —
+      // otherwise a superseded response resolving inside the debounce window
+      // is accepted and its result wipes index-keyed staging.
+      loadRef.current++;
+    };
   }, [pane, sourceKey, activeTable, filterModel, sorts, page, pageSize, loadRows]);
 
   // auto-pick the first discovered sqlite db (Postgres requires explicit connect)
@@ -251,6 +272,7 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
         <ObjectTree schema={schema} activeTable={activeTable} onSelect={(table) => navigate(table, pane)} locked={dataDirty} />
         <div className="flex flex-col min-w-0">
           {err && <Notice variant="error" layout="inline" className="px-3 py-2 text-xs">{err}</Notice>}
+          {filterError && <Notice variant="error" layout="inline" className="px-3 py-2 text-xs">Filter: {filterError}</Notice>}
           {pane === "data" && activeTbl && activeSource && (
             <>
               {filterOpen && !dataDirty && (
@@ -265,7 +287,9 @@ export function WorkspaceDatabaseView({ host, tabId }: { host: ClientHost; tabId
                   </div>
                 </>
               )}
-              <DataGrid table={activeTbl} source={activeSource} writable={writable}
+              {/* Remount on table/source switch so per-table grid state
+                  (hidden columns, staged edits, open modals) can't leak across. */}
+              <DataGrid key={`${sourceKey}:${activeTable}`} table={activeTbl} source={activeSource} writable={writable}
                 columns={activeTbl.columns.map((c) => c.name)} result={result}
                 sorts={sorts} pageSize={pageSize}
                 onSort={(column, additive) => { setSorts((current) => toggleSort(current, column, additive)); setPage(0); }}
@@ -473,7 +497,9 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const [inserts, setInserts] = useState<Record<string, unknown>[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [insertOpen, setInsertOpen] = useState(false);
-  const [preview, setPreview] = useState<RowChangeStatement[] | null>(null);
+  const [preview, setPreview] = useState<{ staged: RowChange[]; statements: RowChangeStatement[] } | null>(null);
+  const [reviewing, setReviewing] = useState(false);
+  const reviewRef = useRef(0);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
   const [transferBusy, setTransferBusy] = useState(false);
@@ -482,7 +508,13 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(() => new Set());
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [inspecting, setInspecting] = useState<{ column: string; value: unknown } | null>(null);
-  useEffect(() => { setSelected(new Set()); setCopyState("idle"); }, [result]);
+  const [editingRow, setEditingRow] = useState<number | null>(null);
+  // Index-keyed staging is meaningless against a new row set — drop it so a
+  // late query response can't retarget edits/deletes onto different rows.
+  useEffect(() => {
+    setSelected(new Set()); setCopyState("idle");
+    setEdits({}); setDeleted(new Set()); setEditing(null); setEditingRow(null);
+  }, [result]);
 
   const rows = result?.rows ?? [];
   const visibleCols = cols.filter((column) => !hiddenColumns.has(column));
@@ -521,6 +553,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
   const identityColumns = primaryColumns.length ? primaryColumns : fallbackKey.map((name) => table.columns.find((column) => column.name === name)!);
   const canInsert = writable && table.type === "table";
   const canEditRows = canInsert && identityColumns.length > 0;
+  const colSpan = visibleCols.length + (canEditRows ? 2 : 1);
   const nonComparableColumns = source.kind === "postgres"
     ? new Set(table.columns.filter((column) => column.comparable === false).map((column) => column.name))
     : undefined;
@@ -533,17 +566,37 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
 
   const revert = () => {
     setEdits({}); setDeleted(new Set()); setInserts([]); setEditing(null);
-    setPreview(null); setMutationError(null);
+    setEditingRow(null); setPreview(null); setMutationError(null);
+    reviewRef.current++; setReviewing(false);
   };
+  // Apply must send exactly what was reviewed — snapshot the change set at
+  // review time so edits staged while the preview request is in flight can't
+  // ride along unreviewed. Staging stays locked until the review window closes
+  // (revert/apply/close): the modal backdrop blocks pointer input only, not
+  // keyboard focus — so any open staging modal must hold the lock too, or
+  // Tab can still reach the toolbar and stack a second modal or delete the
+  // row being edited. The generation check drops a preview that resolves
+  // after a revert.
+  const stagingLocked = reviewing || preview !== null || editingRow !== null || insertOpen || importOpen;
   const review = async () => {
     setMutationError(null);
-    try { setPreview((await dbApi.rows.preview(changes)).statements); }
-    catch (error) { setMutationError(String(error)); }
+    const staged = changes;
+    const request = ++reviewRef.current;
+    setReviewing(true);
+    try {
+      const statements = (await dbApi.rows.preview(source, staged)).statements;
+      if (request === reviewRef.current) setPreview({ staged, statements });
+    } catch (error) {
+      if (request === reviewRef.current) setMutationError(String(error));
+    } finally {
+      if (request === reviewRef.current) setReviewing(false);
+    }
   };
   const apply = async () => {
+    if (!preview) return;
     setApplying(true); setMutationError(null);
     try {
-      await dbApi.rows.apply(source, changes);
+      await dbApi.rows.apply(source, preview.staged);
       revert();
       onApplied();
     } catch (error) { setMutationError(String(error)); }
@@ -585,20 +638,27 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
           </div>
         )}
         <span className="h-5 w-px bg-[var(--border)]" />
-        <button onClick={() => setInsertOpen(true)} disabled={!canInsert}
+        <button onClick={() => setInsertOpen(true)} disabled={!canInsert || stagingLocked}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
           Add row
         </button>
-        <button onClick={() => setImportOpen(true)} disabled={!canInsert || dirty}
+        <button onClick={() => setImportOpen(true)} disabled={!canInsert || dirty || stagingLocked}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
           Import CSV
         </button>
-        <button onClick={() => { setDeleted(new Set([...deleted, ...selected])); setSelected(new Set()); }}
-          disabled={!canEditRows || selected.size === 0}
+        <button onClick={() => {
+            setDeleted(new Set([...deleted, ...selected]));
+            // Delete wins: drop the doomed rows' staged edits so they can't
+            // render as pending changes the review will never list.
+            setEdits((current) => Object.fromEntries(Object.entries(current)
+              .filter(([key]) => !selected.has(Number(key.slice(0, key.indexOf("\u0000")))))));
+            setSelected(new Set());
+          }}
+          disabled={!canEditRows || selected.size === 0 || stagingLocked}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--red)] hover:bg-[var(--hover)] disabled:opacity-40">
           Delete selected
         </button>
-        <button onClick={() => void review()} disabled={!dirty}
+        <button onClick={() => void review()} disabled={!dirty || insertOpen || importOpen || editingRow !== null}
           className="px-2 py-1 rounded text-[11px] font-semibold text-[var(--accent)] hover:bg-[var(--hover)] disabled:opacity-40">
           Review {changes.length || ""} change{changes.length === 1 ? "" : "s"}
         </button>
@@ -621,6 +681,7 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                 <input type="checkbox" aria-label="Select all rows" checked={allSelected}
                   onChange={(event) => setSelected(event.target.checked ? new Set(rows.map((_, i) => i)) : new Set())} />
               </th>
+              {canEditRows && <th className="w-8 border-b border-[var(--border)]" />}
               {visibleCols.map((c) => (
                 <th key={c} className="text-left font-semibold text-[var(--text)] border-b border-[var(--border)] whitespace-nowrap">
                   <button aria-label={`Sort by ${c}`} disabled={dirty} onClick={(event) => onSort(c, event.shiftKey)}
@@ -648,6 +709,15 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                       return next;
                     })} />
                 </td>
+                {canEditRows && (
+                  <td className="w-8 px-1 py-1 border-b border-[var(--border)]">
+                    <button aria-label={`Edit row ${result.offset + i + 1}`} title="Edit this row"
+                      disabled={deleted.has(i) || stagingLocked} onClick={() => setEditingRow(i)}
+                      className="p-1 rounded text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--accent)] disabled:opacity-30">
+                      <Pencil size={12} />
+                    </button>
+                  </td>
+                )}
                 {visibleCols.map((c) => {
                   const v = (row as Record<string, unknown>)[c];
                   const stagedKey = editKey(i, c);
@@ -655,9 +725,9 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                   const isNull = value === null || value === undefined;
                   const isNum = typeof value === "number";
                   const column = table.columns.find((candidate) => candidate.name === c);
-                  const canEditCell = canEditRows && !column?.generated && (v == null || typeof v !== "object");
+                  const canEditCell = canEditRows && !column?.generated && !column?.identity && (v == null || typeof v !== "object");
                   return (
-                    <td key={c} onDoubleClick={() => canEditCell && !deleted.has(i) && setEditing(stagedKey)}
+                    <td key={c} onDoubleClick={() => canEditCell && !deleted.has(i) && !stagingLocked && setEditing(stagedKey)}
                       className={"px-2 py-1 border-b border-[var(--border)] mono text-[var(--text)] align-top " + (isNum ? "text-right " : "") + (stagedKey in edits ? "bg-[var(--accent)]/10 " : "") + (canEditCell ? "cursor-text" : "")}>
                       {editing === stagedKey ? (
                         <input autoFocus aria-label={`Edit row ${result.offset + i + 1} ${c}`}
@@ -667,12 +737,14 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
                             if (event.key === "Enter") event.currentTarget.blur();
                           }}
                           onBlur={(event) => {
-                            const nextValue = coerceCellValue(event.target.value, column?.type ?? "");
-                            setEdits((current) => {
-                              const next = { ...current };
-                              if (Object.is(nextValue, v)) delete next[stagedKey]; else next[stagedKey] = nextValue;
-                              return next;
-                            });
+                            if (event.target.value !== (isNull ? "NULL" : String(value))) {
+                              const nextValue = coerceCellValue(event.target.value, column?.type ?? "", v);
+                              setEdits((current) => {
+                                const next = { ...current };
+                                if (Object.is(nextValue, v)) delete next[stagedKey]; else next[stagedKey] = nextValue;
+                                return next;
+                              });
+                            }
                             setEditing(null);
                           }}
                           className="w-full min-w-16 bg-[var(--bg)] border border-[var(--accent)] rounded px-1 outline-none" />
@@ -688,10 +760,10 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
               </tr>
             ))}
             {result && result.rows.length === 0 && (
-              <tr><td colSpan={visibleCols.length + 1} className="px-2 py-6 text-center text-[var(--faint)]">No rows.</td></tr>
+              <tr><td colSpan={colSpan} className="px-2 py-6 text-center text-[var(--faint)]">No rows.</td></tr>
             )}
             {!result && (
-              <tr><td colSpan={visibleCols.length + 1} className="px-2 py-6 text-center text-[var(--faint)]">Loading…</td></tr>
+              <tr><td colSpan={colSpan} className="px-2 py-6 text-center text-[var(--faint)]">Loading…</td></tr>
             )}
           </tbody>
         </table>
@@ -724,10 +796,86 @@ export function DataGrid({ table, source, writable, columns, result, sorts, page
         }} />
       )}
       {preview && (
-        <RowChangesModal statements={preview} applying={applying} error={mutationError}
+        <RowChangesModal statements={preview.statements} applying={applying} error={mutationError}
           onClose={() => setPreview(null)} onApply={() => void apply()} />
       )}
       {inspecting && <ValueInspector column={inspecting.column} value={inspecting.value} onClose={() => setInspecting(null)} />}
+      {editingRow !== null && rows[editingRow] && result && (
+        <EditRowModal table={table} row={rows[editingRow]} rowNumber={result.offset + editingRow + 1}
+          initial={Object.fromEntries(table.columns.map((column) => {
+            const stagedKey = editKey(editingRow, column.name);
+            return [column.name, stagedKey in edits ? edits[stagedKey] : rows[editingRow][column.name]];
+          }))}
+          onClose={() => setEditingRow(null)}
+          onStage={(staged) => {
+            const row = rows[editingRow];
+            setEdits((current) => {
+              const next = { ...current };
+              for (const [column, value] of Object.entries(staged)) {
+                const stagedKey = editKey(editingRow, column);
+                if (Object.is(value, row[column])) delete next[stagedKey]; else next[stagedKey] = value;
+              }
+              return next;
+            });
+            setEditingRow(null);
+          }} />
+      )}
+    </div>
+  );
+}
+
+function EditRowModal({ table, row, rowNumber, initial, onClose, onStage }: {
+  table: DbTable;
+  row: Record<string, unknown>;
+  rowNumber: number;
+  initial: Record<string, unknown>;
+  onClose: () => void;
+  onStage: (staged: Record<string, unknown>) => void;
+}) {
+  const editable = (column: DbColumn) =>
+    !column.generated && !column.identity && (row[column.name] == null || typeof row[column.name] !== "object");
+  const seedFor = (column: DbColumn) => {
+    const value = initial[column.name];
+    return value === null || value === undefined ? "NULL" : displayDbValue(value);
+  };
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(table.columns.map((column) => [column.name, seedFor(column)])));
+  const submit = () => {
+    const staged: [string, unknown][] = [];
+    for (const column of table.columns) {
+      if (!editable(column)) continue;
+      const raw = values[column.name] ?? "";
+      if (raw !== seedFor(column)) staged.push([column.name, coerceCellValue(raw, column.type, row[column.name])]);
+    }
+    onStage(Object.fromEntries(staged));
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div role="dialog" aria-label="Edit row" className="w-[560px] max-w-[calc(100vw-2rem)] max-h-[85vh] flex flex-col rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
+          <b className="text-sm text-[var(--text)]">Edit row {rowNumber} in {tableLabel(table)}</b>
+          <button aria-label="Close edit row" onClick={onClose} className="ml-auto text-[var(--muted)]">×</button>
+        </div>
+        <div className="overflow-auto p-4 grid gap-2">
+          {table.columns.map((column) => (
+            <label key={column.name} className="grid grid-cols-[140px_1fr] items-center gap-3 text-xs">
+              <span className="truncate text-[var(--muted)]" title={column.name}>
+                {column.name}
+                {column.pk ? <span className="ml-1 text-[9px] font-bold text-[var(--accent)]">PK</span> : null}
+              </span>
+              <input aria-label={`Edit field ${column.name}`} value={values[column.name] ?? ""}
+                disabled={!editable(column)}
+                onChange={(event) => setValues((current) => ({ ...current, [column.name]: event.target.value }))}
+                className="mono min-w-0 rounded-md border border-[var(--border-2)] bg-[var(--bg)] px-2 py-1.5 text-[var(--text)] outline-none focus:border-[var(--accent)] disabled:opacity-50" />
+            </label>
+          ))}
+          <span className="text-[10px] text-[var(--faint)]">Generated and binary/object columns are read-only; type NULL for a null value. Edits are staged for review.</span>
+        </div>
+        <div className="flex justify-end gap-2 px-4 py-3 border-t border-[var(--border)]">
+          <button onClick={onClose} className="px-3 py-1.5 text-xs font-semibold text-[var(--muted)]">Cancel</button>
+          <button onClick={submit} className="px-3 py-1.5 rounded-md text-xs font-bold bg-[var(--accent)] text-[var(--panel)]">Stage changes</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -737,15 +885,18 @@ function InsertRowModal({ table, onClose, onAdd }: {
   onClose: () => void;
   onAdd: (values: Record<string, unknown>) => void;
 }) {
-  const [values, setValues] = useState<Record<string, string>>({});
   const writableColumns = table.columns.filter((column) => !column.generated && !column.identity);
+  // Seed every writable column as an own property so a column named e.g.
+  // "__proto__" reads "" rather than inheriting an Object.prototype member.
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(writableColumns.map((column) => [column.name, ""])));
   const submit = () => {
-    const row: Record<string, unknown> = {};
+    const row: [string, unknown][] = [];
     for (const column of writableColumns) {
       const raw = values[column.name];
-      if (raw !== undefined && raw !== "") row[column.name] = coerceCellValue(raw, column.type);
+      if (raw !== undefined && raw !== "") row.push([column.name, coerceCellValue(raw, column.type)]);
     }
-    onAdd(row);
+    onAdd(Object.fromEntries(row));
   };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={(event) => event.target === event.currentTarget && onClose()}>

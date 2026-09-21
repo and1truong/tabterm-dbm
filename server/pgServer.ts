@@ -283,7 +283,33 @@ export async function readPgSchema(url: string): Promise<DbSchema> {
         ORDER BY n.nspname, rel.relname, con.conname, src_key.ord`,
     ) as Record<string, unknown>[];
 
-    const { primary: pk, foreign: fk, uniqueGroups } = collectPgKeyMetadata(keys);
+    // A CREATE UNIQUE INDEX outside any constraint is still a usable row
+    // identity — the SQLite path reads pragma_index_list for the same reason.
+    // Skip constraint-backed indexes (they already arrived via pg_constraint),
+    // partial/expression indexes, which can't identify every row, and
+    // invalid/not-ready indexes, which don't enforce uniqueness (failed or
+    // in-flight CONCURRENTLY builds, unpartitioned partitions). Column
+    // nullability stays the client's call. indkey is an int2vector, so key
+    // columns are enumerated by subscript, not unnest.
+    const standaloneUnique = await db.unsafe(
+      `SELECT n.nspname AS table_schema, rel.relname AS table_name, idx.relname AS constraint_name,
+              src.attname AS column_name, 'UNIQUE' AS constraint_type,
+              NULL AS ref_schema, NULL AS ref_table, NULL AS ref_column
+         FROM pg_index i
+         JOIN pg_class rel ON rel.oid = i.indrelid
+         JOIN pg_class idx ON idx.oid = i.indexrelid
+         JOIN pg_namespace n ON n.oid = rel.relnamespace
+         JOIN LATERAL generate_series(0, i.indnkeyatts - 1) AS src_key(ord) ON true
+         JOIN pg_attribute src ON src.attrelid = i.indrelid AND src.attnum = i.indkey[src_key.ord]
+        WHERE i.indisunique AND NOT i.indisprimary AND i.indisvalid AND i.indisready
+          AND i.indpred IS NULL AND i.indexprs IS NULL
+          AND rel.relkind IN ('r','p')
+          AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.indexrelid)
+          AND n.nspname NOT IN ('pg_catalog','information_schema')
+        ORDER BY n.nspname, rel.relname, idx.relname, src_key.ord`,
+    ) as Record<string, unknown>[];
+
+    const { primary: pk, foreign: fk, uniqueGroups } = collectPgKeyMetadata([...keys, ...standaloneUnique]);
 
     // Row-count estimates from the planner stats (fast; exact COUNT(*) is slow
     // on large tables). -1 where unknown, matching SQLite views.
@@ -640,8 +666,9 @@ export async function runPgRowChanges(
   url: string,
   changes: RowChange[],
   signal?: AbortSignal,
-  timeoutMs = 30_000,
+  timeoutRaw?: number,
 ): Promise<RowMutationResult> {
+  const timeoutMs = Math.min(Math.max(Math.floor(timeoutRaw ?? 30_000), 1_000), 300_000);
   const statements = compileRowChanges(changes);
   const db = open(url);
   const connection = await db.reserve();

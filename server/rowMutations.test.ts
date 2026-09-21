@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { compileRowChange, compileRowChanges, toPostgresMutationSql } from "./rowMutations.ts";
 import { DbError } from "../shared.ts";
+import type { RowChange } from "../shared.ts";
 
 describe("structured row mutations", () => {
   test("compiles an optimistic update with a qualified relation", () => {
@@ -36,10 +37,39 @@ describe("structured row mutations", () => {
     });
   });
 
+  test("leaves question marks inside quoted identifiers untouched", () => {
+    const statement = compileRowChange({
+      kind: "update",
+      table: { name: "t" },
+      key: { id: 1 },
+      expected: { id: 1 },
+      values: { "score?": 5, 'why "not"': 6 },
+    });
+    expect(statement.sql).toBe(`UPDATE "t" SET "score?" = ?, "why ""not""" = ? WHERE "id" IS ?`);
+    expect(toPostgresMutationSql(statement.sql)).toBe(
+      `UPDATE "t" SET "score?" = $1, "why ""not""" = $2 WHERE "id" IS NOT DISTINCT FROM $3`,
+    );
+  });
+
+  test("keeps expected predicates for columns shadowing Object.prototype names", () => {
+    const statement = compileRowChange({
+      kind: "update",
+      table: { name: "docs" },
+      key: { id: 1 },
+      expected: { id: 1, toString: "x", body: "b" },
+      values: { body: "c" },
+    });
+    expect(statement.sql).toBe(`UPDATE "docs" SET "body" = ? WHERE "id" IS ? AND "toString" IS ? AND "body" IS ?`);
+    expect(statement.params).toEqual(["c", 1, "x", "b"]);
+  });
+
   test("rejects unsafe unidentifiable or empty batches", () => {
     expect(() => compileRowChanges([])).toThrow(DbError);
     expect(() => compileRowChange({
       kind: "delete", table: { name: "users" }, key: {}, expected: {},
     })).toThrow(DbError);
+    expect(() => compileRowChange({
+      kind: "remove", table: { name: "users" }, key: { id: 1 }, expected: { id: 1 },
+    } as unknown as RowChange)).toThrow(DbError);
   });
 });

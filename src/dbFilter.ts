@@ -12,7 +12,7 @@ export type FilterOp = TextOp | NumOp;
 
 export interface FilterRule {
   id: string;
-  col: number;       // index into the table's DbColumn[]
+  col: string;       // column name — name-keyed so a schema shift can't retarget it
   op: FilterOp;
   value: string;
 }
@@ -49,15 +49,22 @@ export const NUM_OPS: { v: NumOp; l: string }[] = [
 let _id = 0;
 export const newId = () => "f" + ++_id;
 export function newRule(cols: DbColumn[]): FilterRule {
-  return { id: newId(), col: 0, op: defaultOp(cols[0]?.type ?? "TEXT"), value: "" };
+  return { id: newId(), col: cols[0]?.name ?? "", op: defaultOp(cols[0]?.type ?? "TEXT"), value: "" };
 }
 export function newGroup(): FilterGroup {
   return { id: newId(), combinator: "AND", rules: [] };
 }
 
+const NUMERIC_TOKENS = new Set([
+  "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT",
+  "INT2", "INT4", "INT8", "SERIAL", "BIGSERIAL", "SMALLSERIAL",
+  "REAL", "FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DEC", "DECIMAL",
+  "NUM", "NUMERIC", "NUMBER", "MONEY", "OID",
+]);
 export function isNumericType(t: string): boolean {
-  const u = t.toUpperCase();
-  return u.includes("INT") || u.includes("REAL") || u.includes("FLOA") || u.includes("NUM") || u.includes("DOUBLE");
+  // Token match, not substring: "DECIMAL" contains no INT/REAL/NUM substring,
+  // and "POINT" must not classify as numeric just because it contains "INT".
+  return t.toUpperCase().split(/[^A-Z0-9]+/).some((token) => NUMERIC_TOKENS.has(token));
 }
 export function opsFor(type: string, dialect: DbDialect = "sqlite") {
   return isNumericType(type) ? NUM_OPS : dialect === "postgres" ? TEXT_OPS : SQLITE_TEXT_OPS;
@@ -83,7 +90,10 @@ function numOrThrow(v: string): number {
 }
 
 function compileRuleExec(r: FilterRule, cols: DbColumn[], params: unknown[], dialect: DbDialect): string {
-  const col = cols[r.col];
+  // A rule can outlive its column (schema reload after DROP/RENAME COLUMN).
+  // Never match — and never silently retarget a different column.
+  const col = cols.find((candidate) => candidate.name === r.col);
+  if (!col) return "1 = 0";
   const name = ident(col.name);
   const numeric = isNumericType(col.type);
   switch (r.op) {
@@ -127,7 +137,8 @@ function sqlLit(value: string, numeric: boolean): string {
   return "'" + value.replace(/'/g, "''") + "'";
 }
 function compileRulePreview(r: FilterRule, cols: DbColumn[], dialect: DbDialect): string {
-  const col = cols[r.col];
+  const col = cols.find((candidate) => candidate.name === r.col);
+  if (!col) return "1 = 0";
   const name = ident(col.name);
   const numeric = isNumericType(col.type);
   switch (r.op) {

@@ -23,7 +23,7 @@ function entries(values: Record<string, unknown>, label: string): [string, unkno
 
 function whereSql(change: Extract<RowChange, { kind: "update" | "delete" }>, params: unknown[]): string {
   const key = entries(change.key, "row key");
-  const expected = Object.entries(change.expected).filter(([column]) => !(column in change.key));
+  const expected = Object.entries(change.expected).filter(([column]) => !Object.prototype.hasOwnProperty.call(change.key, column));
   return [...key, ...expected].map(([column, value]) => {
     params.push(decodeDbValue(value));
     // `IS` is SQLite's null-safe equality and Postgres dispatch rewrites this
@@ -55,8 +55,11 @@ export function compileRowChange(change: RowChange): RowChangeStatement {
       params,
     };
   }
-  const where = whereSql(change, params);
-  return { kind: change.kind, sql: `DELETE FROM ${relation} WHERE ${where}`, params };
+  if (change.kind === "delete") {
+    const where = whereSql(change, params);
+    return { kind: change.kind, sql: `DELETE FROM ${relation} WHERE ${where}`, params };
+  }
+  throw new DbError("invalid_change", `unknown row change kind "${(change as RowChange).kind}"`);
 }
 
 export function compileRowChanges(changes: RowChange[]): RowChangeStatement[] {
@@ -65,10 +68,31 @@ export function compileRowChanges(changes: RowChange[]): RowChangeStatement[] {
   return changes.map(compileRowChange);
 }
 
+// Compiled statements only contain double-quoted identifiers — every value is
+// a bound parameter — so `?` inside a quoted identifier (a legal Postgres name)
+// must not be mistaken for a placeholder.
 export function toPostgresMutationSql(sql: string): string {
   let parameter = 0;
-  return sql.replace(/ IS \?|\?/g, (token) => {
-    const placeholder = `$${++parameter}`;
-    return token === "?" ? placeholder : ` IS NOT DISTINCT FROM ${placeholder}`;
-  });
+  let out = "";
+  let inIdentifier = false;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (inIdentifier) {
+      out += ch;
+      // A doubled quote is an escaped quote, not a terminator.
+      if (ch === '"' && sql[i + 1] === '"') out += sql[++i];
+      else if (ch === '"') inIdentifier = false;
+      continue;
+    }
+    if (ch === '"') { inIdentifier = true; out += ch; continue; }
+    if (ch === "?") {
+      const placeholder = `$${++parameter}`;
+      out = out.endsWith(" IS ")
+        ? `${out.slice(0, -4)} IS NOT DISTINCT FROM ${placeholder}`
+        : out + placeholder;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }

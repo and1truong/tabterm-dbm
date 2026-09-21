@@ -65,3 +65,16 @@ A tabterm host loads these two files via its `modules:` config. See `README.md`.
 - Surgical changes; match existing style. The module's clean host-only boundary is the
   whole point of the extraction — never reach back into a host's internals.
 - Tests are colocated (`*.test.ts`).
+- **Objects keyed by column name are prototype-key hazards.** A column can be named
+  `__proto__`/`toString`/etc. Seed such records with `Object.fromEntries` (creates own
+  properties — a `__proto__` key in an object *literal* sets the prototype instead),
+  write with computed keys (`{...r, [k]: v}` is safe), and never assume
+  `record[name]` returns `undefined` for an unwritten column.
+- **Postgres catalog queries:** `pg_index.indkey` is an `int2vector`, not an array —
+  enumerate key columns via `JOIN LATERAL generate_series(0, i.indnkeyatts - 1)` +
+  `i.indkey[ord]` subscripting (0-based), not `unnest`. When electing indexes as a row
+  identity (`uniqueKeys`), a unique index alone is not enough: require
+  `indisvalid AND indisready`, `indpred IS NULL` (non-partial), `indexprs IS NULL`
+  (no expressions), and exclude constraint-backed indexes via
+  `NOT EXISTS (pg_constraint conindid)`. SQLite parity: `pragma_index_list` must
+  filter `partial = 0` and `index_info` can report NULL names for expression columns.

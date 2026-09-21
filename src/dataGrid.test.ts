@@ -65,6 +65,23 @@ describe("staged row changes", () => {
     expect(coerceCellValue("false", "BOOLEAN")).toBe(false);
   });
 
+  test("keeps numeric affinity on untyped columns holding numbers", () => {
+    expect(coerceCellValue("43", "", 42)).toBe(43);
+    expect(coerceCellValue("abc", "", 42)).toBe("abc");
+    expect(coerceCellValue("", "", 42)).toBe("");
+    expect(coerceCellValue("43", "text", 42)).toBe("43");
+    expect(coerceCellValue("43", "", "x")).toBe("43");
+  });
+
+  test("treats blank input in numeric and boolean columns as NULL", () => {
+    expect(coerceCellValue("", "INTEGER")).toBeNull();
+    expect(coerceCellValue("  ", "REAL")).toBeNull();
+    expect(coerceCellValue("", "NUMERIC(10,2)")).toBeNull();
+    expect(coerceCellValue("", "BOOLEAN")).toBeNull();
+    expect(coerceCellValue("", "text")).toBe("");
+    expect(coerceCellValue("", "")).toBe("");
+  });
+
   test("uses a non-null unique key when a table has no primary key", () => {
     const uniqueTable: DbTable = {
       name: "accounts", type: "table", rowCount: -1, ddl: "", uniqueKeys: [["email"]],
@@ -77,6 +94,21 @@ describe("staged row changes", () => {
     expect(buildRowChanges(uniqueTable, [row], { [editKey(0, "name")]: "Augusta" }, new Set(), [])).toEqual([
       { kind: "update", table: { name: "accounts" }, key: { email: "ada@example.com" }, expected: row, values: { name: "Augusta" } },
     ]);
+  });
+
+  test("keeps staged values for a column named __proto__", () => {
+    const protoTable: DbTable = {
+      name: "t", type: "table", rowCount: -1, ddl: "",
+      columns: [
+        { name: "id", type: "integer", notNull: true, pk: true, fk: null },
+        { name: "__proto__", type: "text", notNull: false, pk: false, fk: null },
+      ],
+    };
+    const row = Object.fromEntries([["id", 1], ["__proto__", "a"]]);
+    const [update] = buildRowChanges(protoTable, [row], { [editKey(0, "__proto__")]: "b" }, new Set(), []);
+    if (update.kind !== "update") throw new Error("expected an update change");
+    expect(Object.prototype.hasOwnProperty.call(update.values, "__proto__")).toBe(true);
+    expect(update.values["__proto__"]).toBe("b");
   });
 
   test("omits non-comparable PostgreSQL columns from optimistic predicates", () => {
